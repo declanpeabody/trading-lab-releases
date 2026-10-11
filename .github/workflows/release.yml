@@ -1,0 +1,55 @@
+name: Test and publish signed update
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Fetch this exact public source commit
+        run: |
+          git init .
+          git remote add origin https://github.com/declanpeabody/trading-lab-releases.git
+          git fetch --depth=1 origin "$GITHUB_SHA"
+          git checkout --detach FETCH_HEAD
+      - name: Verify Python and run tests
+        working-directory: bot
+        run: |
+          python3 -c 'import sys; assert sys.version_info >= (3,12)'
+          python3 -m unittest discover -s tests
+          python3 -m compileall -q .
+      - name: Check browser scripts
+        run: python3 build_release.py --check-js
+  publish:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Fetch the tested public source commit
+        run: |
+          git init .
+          git remote add origin https://github.com/declanpeabody/trading-lab-releases.git
+          git fetch --depth=1 origin "$GITHUB_SHA"
+          git checkout --detach FETCH_HEAD
+      - name: Build and verify signed release assets
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: python3 build_release.py
+      - name: Publish new version without replacing existing assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: declanpeabody/trading-lab-releases
+        run: |
+          version="$(python3 -c 'import sys; sys.path.insert(0,"bot"); from version import VERSION; print(VERSION)')"
+          gh release create "v${version}" dist/app.zip dist/manifest.json dist/manifest.sig dist/public.pem dist/Trading_Bot_Mac_Setup.zip --target "$GITHUB_SHA" --title "Trading Lab ${version}" --notes-file release-notes.md --latest

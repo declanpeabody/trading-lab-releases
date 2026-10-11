@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pem
+*.key
+.env
+config.json
+data/
+updates/
+backups/
+*.sqlite3*
+*.db*
+*.log
+dist/
