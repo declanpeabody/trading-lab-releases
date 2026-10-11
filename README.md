@@ -1,11 +1,12 @@
 # Declan's Trading Lab releases
 
 Public source and signed updates for a **paper-only** Mac trading research bot.
-It cannot submit real-money broker orders. Current version: **2026.10.11.2**.
+It cannot submit real-money broker orders. Source version: **2026.10.11.3** (publish via Actions to release it).
 
 The source, 108 synthetic tests and a manually triggered release workflow are
-included. Repository access is working. **No signed release is active until the
-owner completes the signing-secret setup below and runs the workflow.**
+included. The release channel is active. The owner has completed signing setup; future
+versions are published by manually running the workflow. New installations can
+follow the setup instructions below.
 
 ## One-time signing setup on your Mac
 
