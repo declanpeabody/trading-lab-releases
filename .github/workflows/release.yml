@@ -29,7 +29,7 @@ jobs:
       - name: Check browser scripts
         run: python3 build_release.py --check-js
   publish:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     needs: test
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -42,11 +42,18 @@ jobs:
           git remote add origin https://github.com/declanpeabody/trading-lab-releases.git
           git fetch --depth=1 origin "$GITHUB_SHA"
           git checkout --detach FETCH_HEAD
+      - name: Check whether this version needs publishing
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 release_guard.py
       - name: Build and verify signed release assets
+        if: steps.release.outputs.needed == 'true' 
         env:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: python3 build_release.py
       - name: Publish new version without replacing existing assets
+        if: steps.release.outputs.needed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: declanpeabody/trading-lab-releases

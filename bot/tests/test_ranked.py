@@ -100,22 +100,25 @@ class RankedScannerTests(unittest.TestCase):
         with patch('ranked_scanner.datetime') as clock:
             clock.now.return_value=NOW;self.scanner.cycle(self.ledger)
 
-    def test_complete_watchlist_ranked_before_entries_and_daily_cache_survives(self):
-        self.scan();self.assertEqual(self.scanner.status['histories_ready'],30)
+    def test_ready_batch_drives_entries_and_daily_cache_survives(self):
+        self.scan();self.assertEqual(self.scanner.status['histories_ready'],20)
+        self.assertEqual(self.ledger.read()['positions'],{})
         expected=candidates(rank_histories(self.scanner.daily['bars']),[])
+        self.scan()
         self.assertEqual(self.scanner.status['selected'],expected)
         self.assertEqual(list(self.ledger.read()['positions']),expected[:5])
         self.market.calls=[];self.scanner=RankedScanner(self.tmp.name,self.market);self.scan()
         self.assertFalse(any(c[0]=='time_series' for c in self.market.calls))
 
-    def test_incomplete_watchlist_blocks_entries(self):
-        self.market.bad.add(WATCHLIST[0]);self.scan()
+    def test_incomplete_watchlist_skips_missing_symbol_but_allows_ready_entries(self):
+        self.market.bad.add(WATCHLIST[0]);self.scan();self.scan()
         self.assertFalse(self.scanner.status['ranking_complete'])
-        self.assertEqual(self.ledger.read()['positions'],{})
+        self.assertEqual(len(self.ledger.read()['positions']),5)
+        self.assertNotIn(WATCHLIST[0],self.ledger.read()['positions'])
 
     def test_incomplete_watchlist_preserves_held_checks(self):
-        self.scan();held=set(self.ledger.read()['positions'])
-        absent=next(s for s in WATCHLIST if s not in held)
+        self.scan();self.scan();held=set(self.ledger.read()['positions'])
+        absent=next(s for s in self.scanner.daily['bars'] if s not in held)
         self.scanner.daily['bars'].pop(absent);self.market.bad.add(absent)
         self.scan();self.assertFalse(self.scanner.status['ranking_complete'])
-        self.assertEqual(set(self.scanner.status['checked']),held)
+        self.assertTrue(held.issubset(self.scanner.status['checked']))

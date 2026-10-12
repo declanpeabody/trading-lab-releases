@@ -1,3 +1,21 @@
+# Expanded-universe validation — 2026.10.12.1
+
+117 automated tests passed locally with synthetic data.
+
+New synthetic checks cover a 300-symbol target from a larger filtered catalogue,
+20-history batches, deferred candidate eligibility, holdings checks before batch
+downloads, full coverage across 15 batches, cache/cursor persistence, per-symbol
+failures, missing held histories, daily cache reset, normal-budget exhaustion,
+common-session ranking and expanded journal records. Existing research/backtest
+and account tests remain part of the full regression suite.
+
+Historical research remains the original 30-stock baseline and does not validate
+the expanded scanner's returns. No live provider key or live Mac account was used
+for these tests. JavaScript syntax and Python compilation were checked locally.
+Automatic publication is gated on the complete GitHub test suite. The release
+check rejects incomplete existing releases and downgrades; successful existing
+versions are skipped without overwriting their assets.
+
 # Research validation — 2026.10.11.2
 
 108 automated tests passed with synthetic data on Linux. Added coverage includes:

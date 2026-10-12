@@ -134,11 +134,12 @@ class ScannerJournalTests(unittest.TestCase):
     tearDown=test_ranked.RankedScannerTests.tearDown
     scan=test_ranked.RankedScannerTests.scan
     def test_actual_buys_and_position_limit_are_recorded(self):
-        self.scan();r=self.scanner.journal.state()['records']
+        self.scan();self.scan();r=self.scanner.journal.state()['records'][:30]
         self.assertEqual(sum(x['action']=='BUY' for x in r),5)
         self.assertEqual(sum(x['reason']=='Five-position limit' for x in r),1)
         self.assertEqual(len(r),30)
     def test_journal_failure_does_not_change_trades(self):
+        self.scan()
         with patch.object(self.scanner.journal,'record',side_effect=OSError('disk full')):self.scan()
         self.assertEqual(len(self.ledger.read()['positions']),5)
         self.assertIn('journal write failed',' '.join(self.scanner.status['skipped']))

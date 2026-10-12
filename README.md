@@ -1,11 +1,11 @@
 # Declan's Trading Lab releases
 
 Public source and signed updates for a **paper-only** Mac trading research bot.
-It cannot submit real-money broker orders. Source version: **2026.10.11.3** (publish via Actions to release it).
+It cannot submit real-money broker orders. Source version: **2026.10.12.1**. Live screening targets 300 supported US stocks.
 
-The source, 108 synthetic tests and a manually triggered release workflow are
+The source, synthetic regression tests and an automatic release workflow are
 included. The release channel is active. The owner has completed signing setup; future
-versions are published by manually running the workflow. New installations can
+newer versions publish automatically after changes to main pass the tests. New installations can
 follow the setup instructions below.
 
 ## One-time signing setup on your Mac
@@ -38,17 +38,16 @@ Do not paste this private key in chat, an issue, a repository file or a release.
 Keep `~/.trading-lab-signing/private.pem` securely backed up. Retain the same key
 for future releases. Once saved, clear the clipboard by copying ordinary text.
 
-## Publish the first update
+## Automatic publishing
 
-Open **Actions → Test and publish signed update → Run workflow**, select `main`,
-then click **Run workflow**. Tests run first; only a manual run on main publishes.
-Ordinary pushes and pull requests test without releasing. If GitHub asks to
-enable Actions, enable it for this repository and rerun.
+Push or merge an updated version to main: GitHub runs the tests, then signs and
+publishes automatically. Pull requests only test. Existing complete releases are
+skipped; an older version cannot replace the latest release. The manual workflow
+button remains available for recovery. Signing failures prevent publication.
 
-After success, Releases contains `app.zip`, `manifest.json`, `manifest.sig`,
-`public.pem` and `Trading_Bot_Mac_Setup.zip`. Check the workflow result before
-considering a release complete. Do not reuse a published version tag or overwrite
-release assets.
+On your Mac: **Software Updates → Check for updates → Install reviewed update**.
+Installation always requires your approval. The bot does not create new strategies
+automatically or provide public access to the Mac account.
 
 ## Connect your Mac dashboard
 
@@ -67,7 +66,7 @@ the service runs; installation requires your dashboard approval.
 ## Future upgrades
 
 Change source in `bot/`, increase `bot/version.py`, update `release-notes.md`,
-run tests, then manually run the release workflow on main. Never include local
+then push or merge to main; tests and signed publication run automatically. Never include local
 config.json, API keys, paper databases, news history, logs or private keys in
 commits. The workflow uploads only explicit public asset filenames.
 

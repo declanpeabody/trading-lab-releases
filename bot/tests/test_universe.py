@@ -1,0 +1,92 @@
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+from datetime import timedelta
+from engine import Ledger
+from market import ApiBudget
+from strategy import WATCHLIST,screening_universe,LIVE_VERSION
+from ranked_scanner import RankedScanner
+from test_scanner import FakeMarket,NOW,listing
+
+class LargeMarket(FakeMarket):
+    def get(self,endpoint,priority=False,**params):
+        if endpoint=='stocks':
+            self.calls.append((endpoint,None,priority))
+            return {'data':[listing(s) for s in (*WATCHLIST,*(f'S{i:03}' for i in range(450)))]}
+        return super().get(endpoint,priority=priority,**params)
+
+class UniverseTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.root=Path(self.tmp.name)
+        self.market=LargeMarket();self.ledger=Ledger(self.root/'paper.sqlite3');self.ledger.control('start')
+        self.scanner=RankedScanner(self.root,self.market)
+    def tearDown(self):self.ledger.db.close();self.tmp.cleanup()
+    def scan(self,day=NOW):
+        with patch('ranked_scanner.datetime') as clock:
+            clock.now.return_value=day
+            self.scanner.cycle(self.ledger)
+    def test_universe_is_stable_unique_and_retains_original_stocks(self):
+        mapping={s:'NASDAQ' for s in (*WATCHLIST,*(f'S{i:03}' for i in range(450)))}
+        selected=screening_universe(mapping)
+        self.assertEqual(len(selected),300);self.assertEqual(len(set(selected)),300)
+        self.assertEqual(selected[:30],list(WATCHLIST))
+        self.assertEqual(selected,screening_universe(dict(reversed(list(mapping.items())))))
+    def test_first_batch_is_bounded_and_never_trades_unprepared_stocks(self):
+        self.scan();self.assertEqual(self.scanner.status['universe_count'],300)
+        self.assertEqual(len(self.scanner.status['history_batch']),20)
+        self.assertEqual(self.scanner.status['histories_pending'],280)
+        self.assertEqual(self.ledger.read()['positions'],{})
+        self.market.calls=[];self.scan()
+        calls=self.market.calls
+        self.assertLess(max(i for i,c in enumerate(calls) if c[0]=='quote'),min(i for i,c in enumerate(calls) if c[0]=='time_series'))
+        self.assertEqual(len(self.ledger.read()['positions']),5)
+        self.assertTrue(set(self.ledger.read()['positions']).issubset(WATCHLIST[:20]))
+    def test_three_hundred_histories_over_batches_with_restart(self):
+        self.ledger.control('block')
+        for i in range(15):
+            if i==7:self.scanner=RankedScanner(self.root,self.market)
+            self.scan()
+        self.assertEqual(self.scanner.status['histories_ready'],300)
+        self.assertEqual(self.scanner.status['histories_pending'],0)
+        self.assertEqual(len([c for c in self.market.calls if c[0]=='time_series']),300)
+        self.scan();self.assertTrue(self.scanner.status['ranking_complete'])
+        self.assertEqual(self.scanner.daily['version'],LIVE_VERSION)
+    def test_failed_stock_is_not_retried_repeatedly_and_does_not_block_others(self):
+        self.market.bad.add('AAPL');self.scan();self.scan();self.scan()
+        self.assertEqual(sum(c[0]=='time_series' and c[1]=='AAPL' for c in self.market.calls),1)
+        self.assertEqual(len(self.ledger.read()['positions']),5)
+        self.assertIn('AAPL',self.scanner.status['history_failures'])
+    def test_normal_budget_exhaustion_still_checks_holdings(self):
+        self.scan();self.scan();held=set(self.ledger.read()['positions']);self.market.calls=[]
+        self.market.reject_candidates=True
+        with patch.object(ApiBudget,'used',return_value=500):self.scan()
+        self.assertTrue(held.issubset(self.scanner.status['checked']))
+        self.assertFalse(any(c[0]=='time_series' and not c[2] for c in self.market.calls))
+        self.assertEqual(self.scanner.status['history_batch'],[])
+    def test_daily_reset_continues_cursor_and_never_uses_previous_day_candidate_cache(self):
+        self.ledger.control('block');self.scan();cursor=self.scanner.state['screen_cursor']
+        self.market.calls=[];self.scan(NOW+timedelta(days=3))
+        self.assertEqual(self.scanner.status['selected'],[])
+        self.assertEqual(self.scanner.status['history_batch'][0],self.scanner.status['universe_symbols'][cursor])
+        self.assertEqual(self.scanner.status['histories_ready'],20)
+    def test_held_history_failure_blocks_candidates(self):
+        self.scan();self.scan();held=next(iter(self.ledger.read()['positions']))
+        self.scanner.daily['bars'].pop(held);self.market.bad.add(held);self.market.calls=[]
+        before=self.ledger.read()['positions']
+        with self.assertRaisesRegex(ValueError,'Held stock'):self.scan()
+        self.assertEqual(self.ledger.read()['positions'],before)
+        self.assertFalse(any(c[0]=='quote' for c in self.market.calls))
+    def test_disjoint_history_grid_excludes_only_that_stock(self):
+        self.ledger.control('block');self.scan()
+        row=self.scanner.daily['bars']['AAPL'][0];row['datetime']='2020-01-01'
+        self.scan()
+        self.assertNotIn('AAPL',self.scanner.status['rankable_symbols'])
+        self.assertTrue(self.scanner.status['selected'])
+    def test_journal_covers_expanded_universe_without_inventing_features(self):
+        self.scan();state=self.scanner.journal.state(limit=400)
+        self.assertEqual(state['total'],300)
+        self.assertTrue(all(r['features'] is None and r['action']=='SKIP' for r in state['records']))
+        self.scan();state=self.scanner.journal.state(limit=300)
+        self.assertEqual(sum(r['action']=='BUY' for r in state['records']),5)
+        self.assertTrue(all(r['strategy_version']==LIVE_VERSION for r in state['records']))

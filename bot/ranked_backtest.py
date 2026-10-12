@@ -9,6 +9,7 @@ from strategy import (WATCHLIST, PAPER_CAPITAL, MAX_POSITION, MAX_OPEN,
 LABELS={'strategy':'Ranked strategy','unranked':'Alphabetical baseline',
         'equal_weight':'Equal-weight hold (30 stocks)','cash':'Cash'}
 WARNINGS=[
+    "Fixed 30-stock historical baseline only: this does not replay the live 300-stock target universe, batch timing or partial data coverage. It cannot establish performance of the expanded scanner.",
     'Daily approximation: ranking and entry/exit signals use completed prior-session bars; fills occur at the next open. Intraday 15-minute decisions, intraday lows and the 3% intraday loss block are NOT replayed.',
     'The 30-stock watchlist is selected today. Selection/survivorship bias remains; the alphabetical baseline isolates ordering within this same sample, not performance of the old whole-market scanner.',
     'Holdings start empty with £1,000. Existing paper holdings, funding history and latched control flags are not replayed.',

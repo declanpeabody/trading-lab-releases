@@ -1,5 +1,6 @@
 """Shared, versioned research rules; parameter choices are not optimised."""
 import math
+import hashlib
 import statistics
 
 VERSION = 'ranked-daily-v1'
@@ -52,3 +53,16 @@ def settings():
         max_positions=MAX_OPEN,candidate_count=CANDIDATES,stop_fraction=STOP_FRACTION,
         loss_fraction=LOSS_FRACTION,daily_loss_fraction=DAILY_LOSS_FRACTION,
         watchlist=WATCHLIST,ranking='20-session return / max(daily volatility, 1%)')
+
+
+# Live screening is separate from the fixed 30-stock research baseline.
+LIVE_VERSION='ranked-batched-300-v1'
+UNIVERSE_TARGET=300
+HISTORY_BATCH=20
+
+def screening_universe(mapping):
+    """Stable catalogue sample, not the largest 300 stocks or an index."""
+    seeds=[s for s in WATCHLIST if s in mapping]
+    others=sorted((s for s in mapping if s not in seeds),
+        key=lambda s:(hashlib.sha256(('trading-lab-300-v1:'+s).encode()).hexdigest(),s))
+    return (seeds+others)[:UNIVERSE_TARGET]

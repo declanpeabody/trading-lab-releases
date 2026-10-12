@@ -1,3 +1,50 @@
+# Expanded paper screening — 2026.10.12.1
+
+Install from Software Updates → Check for updates → Install reviewed update.
+Versioned changes to GitHub main now publish automatically after the tests pass;
+you no longer need to run the release workflow yourself.
+
+The live scanner targets 300 USD-denominated US common stocks supported by the
+provider on NASDAQ/NYSE. It keeps the original 30 when listed, then fills the rest
+by stable SHA-256 ordering of catalogue tickers. This is a reproducible sample,
+not the largest 300 companies, a market index or a stock recommendation.
+Catalogue changes are picked up approximately weekly. If fewer stocks are
+returned, the dashboard shows the real count instead of claiming 300.
+
+Each cycle checks holdings and up to six candidates using histories prepared
+today. It then downloads up to 20 additional histories, with a three-minute batch
+time budget checked between requests. Those histories become eligible on the
+NEXT cycle. Each cycle is followed by a 15-minute wait; API processing increases
+the interval. At least 15 batches are needed for 300 stocks. Quota limits, pausing,
+outages and Mac sleep may extend coverage across sessions. A persistent cursor
+resumes where it left off so the end of the list is not starved. Each new day
+clears candidate histories, but retains the cursor. Failed histories retry next day.
+
+Only valid same-day downloaded histories on a common completed-session grid are
+ranked. Missing stocks are skipped individually. Held histories, quotes and FX
+must all validate before decisions. Volume eligibility is for entries only;
+missing volume does not stop exits. The first scan after installation usually
+prepares data without entering trades. The dashboard separates cached histories
+from histories used for the latest decisions.
+
+Local daily ceilings remain 500 total attempts for normal screening/research and
+700 for priority holdings checks. These counters cannot see other apps using the
+key. Research competes for the budget; run it outside trading hours. No paid
+subscription is required by the code, but data access depends on your entitlement.
+
+The journal records the universe plus holdings. Its latest 200 rows prioritise
+visibility of held/selected decisions. Storage grows faster at this size.
+Histories downloaded after decisions are not retroactively added to their evidence.
+Forward outcomes are best-effort when later history retains the reference.
+
+Historical/walk-forward reports remain a FIXED 30-stock baseline. They do not
+simulate the expanded universe, batching or partial coverage and cannot establish
+its profitability. Paper capital (£1,000), maximum purchase (£200), five-position
+cap, existing risk rules, account history and news observation-only mode are kept.
+
+---
+Earlier release notes follow; the current behaviour is described above.
+
 # Research and decision journal — version 2026.10.11.2
 
 Install this download using Mac_Setup.command → option 8, then open
