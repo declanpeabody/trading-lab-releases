@@ -1,3 +1,25 @@
+# Dashboard tabs and market display — version 2026.10.12.3
+
+Install from Software Updates, or let automatic mode install during its next
+permitted window. Refresh the dashboard after the restart.
+
+The top navigation now includes Overview, Positions, Scanner, Markets,
+Research & Journal, News, Rules & Limits, and Software Updates. Account views
+keep bot status visible while separating holdings, coverage and rules.
+
+US markets are displayed through TradingView in your browser, without any
+Twelve Data requests. Official index selections can be delayed or restricted.
+Use the ETF tracker selection if necessary; its USD fund share prices are not
+index levels. Markets includes links to CNBC for all five requested indices.
+Hide/reload controls affect only the display, never paper trading. The external
+provider receives normal browser connection information, but the app sends it
+no account state, API keys or trading controls.
+
+The market display is informational and is not used by the strategy. This update
+does not raise the local data budget or fix an exhausted allowance.
+
+---
+
 # Automatic installation — version 2026.10.12.2
 
 Install this version once from **Software Updates → Check for updates → Install

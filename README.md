@@ -85,3 +85,12 @@ dependencies require a new bootstrap. Journal and research use existing modules.
 Tests verify software behaviour, not returns. Mac launchd, power-loss recovery,
 visual layout and live feeds have not been validated in the development Linux
 environment. See bot/START_HERE_MAC.md and bot/VALIDATION.md for limitations.
+
+## Dashboard market overview
+
+Version 2026.10.12.3 adds eight navigation tabs and an external TradingView market
+panel. This uses no Twelve Data credits and never changes trading decisions.
+Index quotes can be restricted or delayed. The optional ETF view shows fund share
+prices rather than index levels; CNBC links are supplied for the exact indices.
+See TradingView's widget data policy:
+https://www.tradingview.com/widget-docs/faq/data/

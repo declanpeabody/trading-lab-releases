@@ -38,6 +38,14 @@ def worker(ledger):
         STOP.wait(900)
 
 
+def top_navigation(path,nonce):
+    links=[('/#overview','Overview'),('/#positions','Positions'),('/#scanner','Scanner'),('/#markets','Markets'),
+           ('/research','Research & Journal'),('/news','News'),('/#rules','Rules & Limits'),('/updates','Software Updates')]
+    style='<style nonce="'+nonce+'">.top-nav{display:flex;flex-wrap:wrap;gap:8px;margin:20px 0;padding:0 0 16px;border-bottom:1px solid #2b3545}.top-nav a{display:inline-flex;align-items:center;min-height:44px;padding:10px 14px;border:1px solid #3f4d63;border-radius:7px;color:#c6d0df;background:#111925;text-decoration:none;font:600 13px system-ui}.top-nav a[aria-current]{color:#101620;background:#d8f36a;border-color:#d8f36a}.top-nav a:focus-visible{outline:3px solid #a8ceff;outline-offset:3px}</style>'
+    return style+'<nav class="top-nav" aria-label="Dashboard navigation">'+''.join(
+        '<a href="'+href+'"'+(' aria-current="page"' if href==path else '')+'>'+label.replace('&','&amp;')+'</a>' for href,label in links)+'</nav>'
+
+
 def handler_factory(ledger, username, password, thread, research=None, news=None, updates=None, journal=None):
     csrf = secrets.token_urlsafe(32)
     auth = 'Basic ' + base64.b64encode(f'{username}:{password}'.encode()).decode()
@@ -98,9 +106,9 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
                     self.respond(400, '{"error":"Export unavailable"}')
             elif self.path in ('/', '/research', '/news', '/updates'):
                 nonce = secrets.token_urlsafe(24)
-                body = (ROOT/({'/research':'research.html','/news':'news.html','/updates':'updates.html'}.get(self.path,'dashboard.html'))).read_text().replace('__NONCE__',nonce)
+                body = (ROOT/({'/research':'research.html','/news':'news.html','/updates':'updates.html'}.get(self.path,'dashboard.html'))).read_text().replace('__NONCE__',nonce).replace('__TOP_NAV__',top_navigation(self.path,nonce))
                 self.respond(200, body, 'text/html; charset=utf-8', {
-                    'Content-Security-Policy':f"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; connect-src 'self'; img-src data:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"})
+                    'Content-Security-Policy':f"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; connect-src 'self'; frame-src https://www.tradingview-widget.com; img-src data:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"})
             else:
                 self.respond(404, '{"error":"Not found"}')
 

@@ -1,3 +1,19 @@
+# Dashboard validation — 2026.10.12.3
+
+JavaScript syntax and Python compilation checked. DOM interaction checks cover
+all eight navigation links, switching five account panels, active navigation,
+the five index configurations, ETF mode, hide/show, and authenticated control
+payloads. Mock requests confirm market display does not call the trading API.
+HTTP regression coverage checks common navigation and the narrowly allowed
+external frame origin while retaining nonce scripts and same-origin connections.
+
+The provider iframe endpoint returned HTML. A browser executable was unavailable;
+its download failed, so no visual rendering or live quote verification is claimed.
+Index availability and delay depend on the provider; fallbacks are labelled.
+The complete existing test suite gates the signed GitHub release.
+
+---
+
 # Automatic-update validation — 2026.10.12.2
 
 20 focused updater tests passed locally. Coverage includes signed release and

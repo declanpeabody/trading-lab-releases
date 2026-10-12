@@ -1,16 +1,18 @@
-# 2026.10.12.2 — Optional automatic software updates
+# 2026.10.12.3 — Dashboard tabs and US market display
 
-Install this upgrade once, then select Enable automatic updates in Software Updates.
+- Eight top navigation links: Overview, Positions, Scanner, Markets,
+  Research & Journal, News, Rules & Limits, and Software Updates.
+- Dedicated account panels, persistent bot status, and clearer empty-position text.
+- TradingView market display with five index selections: DJIA, S&P 500,
+  Nasdaq Composite, Nasdaq 100, and Russell 2000. Quotes may be delayed or
+  unavailable under the widget provider's exchange permissions.
+- Explicit ETF tracker alternative (DIA, SPY, ONEQ, QQQ, IWM): fund share prices,
+  not index levels. CNBC index links remain available in Markets.
+- Market display uses no Twelve Data credits and never supplies trading signals.
+  External content runs in a separate cross-origin frame; account scripts remain
+  protected by the existing nonce and same-origin connection policy.
+- Hide/reload controls and horizontal scrolling for narrow screens.
 
-- Checks shortly after service startup and daily; optional unattended installation
-  at weekends or 5pm–8am New York time on weekdays.
-- Setting persists across updates/restarts. Manual checks and installations remain.
-- Pinned signatures and file hashes verified before launch. Existing backup,
-  restart, health/version check and attempted rollback protect the paper account.
-- Installation attempts persist so failures cannot repeatedly auto-install the
-  same release. An uncertain launch requires manual inspection.
-- Automatic mode permits future signed releases including strategy changes;
-  signing and automated tests do not imply a separate human review.
-
-Mac must be awake and online. Install/restart and recovery require verification
-on the actual Mac; power loss or disk failure may require manual recovery.
+The external feed needs internet access in your browser. No real-time entitlement
+is promised. Automated navigation/control checks passed; browser visual rendering
+and live quote availability still need checking on the Mac.

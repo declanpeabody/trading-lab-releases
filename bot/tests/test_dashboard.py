@@ -121,4 +121,22 @@ class DashboardTests(unittest.TestCase):
             self.assertIn('Decision journal',body)
             self.assertNotIn('__NONCE__',body)
 
+    def test_navigation_and_external_feed_keep_account_isolated(self):
+        for path in ('/','/research','/news','/updates'):
+            with self.get(path) as response:
+                body=response.read().decode();policy=response.headers['Content-Security-Policy']
+                self.assertNotIn('__TOP_NAV__',body)
+                for href in ('/#positions','/#scanner','/#markets','/#rules','/research','/news','/updates'):
+                    self.assertIn('href="'+href+'"',body)
+                self.assertIn("connect-src 'self'",policy)
+                self.assertIn('frame-src https://www.tradingview-widget.com;',policy)
+                self.assertNotIn("script-src https:",policy)
+                self.assertNotIn("'unsafe-inline'",policy)
+                if path=='/':
+                    self.assertIn("frame.referrerPolicy='no-referrer'",body)
+                    self.assertIn('ETF trackers',body)
+                    self.assertIn('not index levels',body)
+                    self.assertNotIn('51,850.31',body)
+                    self.assertNotIn('src="https://s3.tradingview.com',body)
+
 if __name__ == '__main__': unittest.main()
