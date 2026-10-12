@@ -1,3 +1,23 @@
+# Automatic installation — version 2026.10.12.2
+
+Install this version once from **Software Updates → Check for updates → Install
+reviewed update**. Then click **Enable automatic updates** in that panel.
+The setting starts off and persists when enabled. Future signed releases are
+checked shortly after startup and daily, then installed automatically at weekends
+or between 5pm and 8am New York time on weekdays. Keep the Mac awake, online and
+the service running. Disabling automatic mode keeps manual checks/installations.
+
+Automatic mode authorises future signed releases, including strategy changes.
+Passing tests and a valid signature are not a separate human review. Existing
+backup, service restart, version/health check and attempted rollback remain in
+place. An attempted version cannot automatically retry, even after restarting;
+review a failure in Software Updates and manually retry after resolving it.
+An uncertain launch is held for manual inspection. Power/disk failure can still
+require manual recovery. The 300-stock scanner, paper funding and purchase limits
+are unchanged by this update.
+
+---
+
 # Expanded paper screening — 2026.10.12.1
 
 Install from Software Updates → Check for updates → Install reviewed update.

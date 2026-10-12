@@ -1,21 +1,16 @@
-# Trading Lab 2026.10.12.1
+# 2026.10.12.2 — Optional automatic software updates
 
-- Expanded live screening to a target of 300 supported NASDAQ/NYSE US common stocks.
-- Keeps the original 30 where listed, then fills the target using a stable
-  catalogue sample. It is not a largest-300 index or the entire market.
-- Checks holdings and up to six prepared candidates before downloading the next
-  batch of up to 20 histories. New histories enter the following scan's ranking.
-- Only same-day downloads with matching completed-session grids are ranked.
-  Missing histories skip individual stocks instead of blocking all new entries.
-- Retains local 500 normal / 700 priority request ceilings and the £1,000 paper
-  capital, £200 purchase cap and five-position limit.
-- Dashboard shows actual universe, downloaded, ranked, pending and unavailable
-  counts, plus tickers. Journal includes the expanded universe.
-- Historical/walk-forward research is explicitly labelled as a fixed 30-stock
-  baseline, not a replay or validation of the expanded scanner.
-- Future versioned changes to main publish automatically after tests pass.
+Install this upgrade once, then select Enable automatic updates in Software Updates.
 
-A full scan needs at least 15 history batches. Quota, missing data, service uptime
-and request duration affect coverage. Each cycle waits 15 minutes after processing.
-Stocks not yet prepared cannot be bought. Live provider data and the expanded scan
-have not been tested on the user's Mac. This remains paper-only.
+- Checks shortly after service startup and daily; optional unattended installation
+  at weekends or 5pm–8am New York time on weekdays.
+- Setting persists across updates/restarts. Manual checks and installations remain.
+- Pinned signatures and file hashes verified before launch. Existing backup,
+  restart, health/version check and attempted rollback protect the paper account.
+- Installation attempts persist so failures cannot repeatedly auto-install the
+  same release. An uncertain launch requires manual inspection.
+- Automatic mode permits future signed releases including strategy changes;
+  signing and automated tests do not imply a separate human review.
+
+Mac must be awake and online. Install/restart and recovery require verification
+on the actual Mac; power loss or disk failure may require manual recovery.

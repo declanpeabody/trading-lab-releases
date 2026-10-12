@@ -78,3 +78,77 @@ class Rollback(unittest.TestCase):
         self.assertIn('restored',self.run_update()['message'])
     def test_partial_backup_never_replaces_original_data(self):
         self.assertIn('before replacement',self.run_update(partial=True)['message'])
+
+class AutomaticUpdates(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+        self.base=Path(self.tmp.name);self.u=updater.Updates(self.base)
+        updater.save(self.u.config,{'repo':'owner/repo'});self.u.key.write_text('test')
+        updater.save(self.base/'config.json',{'python':'python3'})
+        self.stage=self.u.root/'ready';self.stage.mkdir()
+        updater.save(self.u.status_path,{'available':True,'version':'2099.1.1.1','stage':'ready'})
+    def test_opt_in_persists_and_requires_boolean(self):
+        self.assertFalse(self.u.state()['automatic'])
+        self.u.set_automatic(True)
+        self.assertTrue(updater.Updates(self.base).state()['automatic'])
+        with self.assertRaises(ValueError):self.u.set_automatic('true')
+        self.u.set_automatic(False)
+        self.assertFalse(updater.Updates(self.base).state()['automatic'])
+    def test_window_boundaries_and_dst(self):
+        from datetime import datetime
+        for stamp,expected in [('2026-10-12T11:59:00+00:00',True),('2026-10-12T12:00:00+00:00',False),('2026-10-12T20:59:00+00:00',False),('2026-10-12T21:00:00+00:00',True),('2026-10-17T15:00:00+00:00',True),('2026-11-02T21:59:00+00:00',False),('2026-11-02T22:00:00+00:00',True)]:
+            self.assertEqual(updater.automatic_window(datetime.fromisoformat(stamp)),expected,stamp)
+    def test_tick_waits_for_opt_in_and_window(self):
+        self.u.last_check=updater.time.time()
+        with patch.object(self.u,'install') as install,patch.object(updater,'automatic_window',return_value=True):
+            self.u.tick();install.assert_not_called()
+            self.u.set_automatic(True);self.u.tick()
+            install.assert_called_once_with('2099.1.1.1',automatic=True)
+        with patch.object(self.u,'install') as install,patch.object(updater,'automatic_window',return_value=False):
+            self.u.tick();install.assert_not_called()
+    def test_interrupted_attempt_persists_and_newer_release_can_proceed(self):
+        self.u.set_automatic(True)
+        updater.save(self.u.attempt_path,{'version':'2099.1.1.1'})
+        u=updater.Updates(self.base);u.last_check=updater.time.time()
+        with patch.object(u,'install') as install,patch.object(updater,'automatic_window',return_value=True):
+            u.tick();install.assert_not_called()
+            updater.save(u.status_path,{'available':True,'version':'2099.1.1.2','stage':'ready'})
+            u.tick();install.assert_called_once_with('2099.1.1.2',automatic=True)
+    def test_hold_and_installing_prevent_background_work(self):
+        self.u.set_automatic(True);self.u.last_check=updater.time.time()
+        (self.base/'data').mkdir();(self.base/'data'/'update_hold').touch()
+        with patch.object(self.u,'install') as install,patch.object(updater,'automatic_window',return_value=True):
+            self.u.tick();install.assert_not_called()
+        updater.save(self.u.status_path,{'installing':True})
+        with patch.object(self.u,'check') as check:
+            self.u.last_check=0;self.u.tick();check.assert_not_called()
+    def launch(self,automatic=True,result=0,exception=None,version='2099.1.1.1'):
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            stack.enter_context(patch('sys.platform','darwin'))
+            stack.enter_context(patch.object(updater,'automatic_window',return_value=True))
+            stack.enter_context(patch.object(updater,'verify',return_value={'version':version}))
+            stack.enter_context(patch.object(updater,'unpack'))
+            run=stack.enter_context(patch.object(updater.subprocess,'run',side_effect=exception,return_value=subprocess.CompletedProcess([],result)))
+            self.u.install('2099.1.1.1',automatic=automatic)
+            return run
+    def test_launch_failure_is_latched_but_manual_retry_works(self):
+        self.u.set_automatic(True)
+        with self.assertRaisesRegex(ValueError,'launch'):self.launch(result=1)
+        self.assertEqual(updater.Updates(self.base).state()['automatic_attempted_version'],'2099.1.1.1')
+        with self.assertRaisesRegex(ValueError,'already had'):self.launch()
+        self.launch(automatic=False)
+        self.assertTrue(self.u.state()['installing'])
+    def test_launch_timeout_holds_installation(self):
+        self.u.set_automatic(True)
+        with self.assertRaisesRegex(ValueError,'confirmed'):self.launch(exception=subprocess.TimeoutExpired('launchctl',15))
+        self.assertTrue(self.u.state()['installing'])
+        self.assertFalse(self.u.state()['available'])
+    def test_install_rechecks_preference_and_exact_signed_version(self):
+        with self.assertRaisesRegex(ValueError,'permitted'):self.launch()
+        self.u.set_automatic(True)
+        with self.assertRaisesRegex(ValueError,'changed'):self.launch(version='2099.1.1.2')
+        self.assertFalse(self.u.attempt_path.exists())
+    def test_monitor_checks_on_startup_even_in_manual_mode(self):
+        updater.save(self.u.status_path,{})
+        with patch.object(self.u,'check') as check:self.u.tick();check.assert_called_once()

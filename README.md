@@ -46,8 +46,11 @@ skipped; an older version cannot replace the latest release. The manual workflow
 button remains available for recovery. Signing failures prevent publication.
 
 On your Mac: **Software Updates → Check for updates → Install reviewed update**.
-Installation always requires your approval. The bot does not create new strategies
-automatically or provide public access to the Mac account.
+Install version 2026.10.12.2 once, then click **Enable automatic updates** in the
+Software Updates panel. This setting is off until enabled and persists across
+restarts and updates. You can disable it or install manually at any time before
+an installation starts. The bot does not create new strategies automatically
+or provide public access to the Mac account.
 
 ## Connect your Mac dashboard
 
@@ -61,7 +64,14 @@ pbcopy < "$HOME/.trading-lab-signing/public.pem"
 
 Paste it in the public-key field, save the channel and check for updates. The
 channel is pinned. Equal versions report no newer update. Checks run daily while
-the service runs; installation requires your dashboard approval.
+the service runs, with a check shortly after startup. Automatic mode installs
+signed releases at weekends or 17:00–08:00 America/New_York on weekdays, with
+backup, restart, version/health verification and attempted rollback on failure.
+The Mac must be awake and online. An attempted release will not automatically
+retry after failure or restart; inspect the status and retry manually if needed.
+Automatic mode authorises every future signed release, including strategy changes;
+signatures and passing tests do not establish separate human review. Power loss,
+forced termination or disk failure may still require manual recovery.
 
 ## Future upgrades
 

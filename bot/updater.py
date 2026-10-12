@@ -1,4 +1,6 @@
-"""User-approved signed updates. No broker credentials or automatic installation."""
+"""Pinned signed releases with optional unattended Mac installation."""
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import hashlib
 import json
 import os
@@ -66,10 +68,20 @@ def unpack(stage,manifest):
             (target/entry.filename).write_bytes(data)
     return target
 
+def automatic_window(now=None):
+    # Leave an hour after the regular session and 90 minutes before its next open.
+    local=(now or datetime.now(ZoneInfo('America/New_York'))).astimezone(ZoneInfo('America/New_York'))
+    return local.weekday()>=5 or local.hour>=17 or local.hour<8
+
+def read_json(path,default):
+    try:return json.loads(path.read_text())
+    except (OSError,ValueError):return default
+
 class Updates:
     def __init__(self,base):
         self.base=Path(base);self.root=self.base/'updates';self.root.mkdir(parents=True,exist_ok=True)
         self.config=self.root/'channel.json';self.key=self.root/'public.pem';self.status_path=self.root/'status.json'
+        self.preferences=self.root/'preferences.json';self.attempt_path=self.root/'install-attempt.json'
         self.lock=threading.Lock();self.busy=False;self.last_check=0
 
     def state(self):
@@ -77,7 +89,18 @@ class Updates:
         if self.status_path.exists():
             try:info=json.loads(self.status_path.read_text())
             except (OSError,ValueError):pass
-        return info|{'installed_version':VERSION,'configured':self.config.exists() and self.key.exists(),'busy':self.busy}
+        attempt=read_json(self.attempt_path,{})
+        return info|{'installed_version':VERSION,'configured':self.config.exists() and self.key.exists(),'busy':self.busy,
+            'automatic':read_json(self.preferences,{}).get('automatic',False) is True,
+            'automatic_attempted_version':attempt.get('version'),
+            'automatic_window_open':automatic_window()}
+
+    def set_automatic(self,enabled):
+        if type(enabled) is not bool:raise ValueError('Automatic updates must be true or false')
+        with self.lock:
+            if self.state().get('installing'):raise ValueError('Installation has already started')
+            if enabled and not self.state()['configured']:raise ValueError('Connect the release channel first')
+            save(self.preferences,{'automatic':enabled})
 
     def configure(self,repo,key):
         if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+',repo):raise ValueError('Use owner/repository')
@@ -122,14 +145,23 @@ class Updates:
             save(self.status_path,{'available':False,'message':str(exc) if isinstance(exc,ValueError) else 'Release check failed; installed bot unchanged.'})
         finally:self.busy=False
 
-    def install(self,version):
+    def install(self,version,automatic=False):
         import sys
         if sys.platform!='darwin':raise ValueError('Dashboard installation is supported on the Mac setup only')
         with self.lock:
             if self.busy:raise ValueError('An update operation is already running')
             state=self.state()
+            if state.get('installing'):raise ValueError('Installation is already in progress')
+            if automatic:
+                if not state['automatic'] or not automatic_window():raise ValueError('Automatic installation is not currently permitted')
+                if state.get('automatic_attempted_version')==version:raise ValueError('This release already had an installation attempt; review it manually')
+                if (self.base/'data'/'update_hold').exists():raise ValueError('Resolve the previous installation before automatic updates')
             if not state.get('available') or state.get('version')!=version:raise ValueError('Check and review the release first')
-            stage=self.root/state['stage'];manifest=verify(stage,self.key);unpack(stage,manifest)
+            stage=(self.root/state['stage']).resolve()
+            if stage.parent!=self.root.resolve():raise ValueError('Invalid staged release location')
+            manifest=verify(stage,self.key)
+            if manifest['version']!=version:raise ValueError('Staged release changed; check again')
+            unpack(stage,manifest)
             config=json.loads((self.base/'config.json').read_text())
             # Independent launchd job survives stopping the trading service.
             label='uk.declan.tradinglab.update.'+uuid.uuid4().hex
@@ -137,14 +169,34 @@ class Updates:
             job.write_bytes(plistlib.dumps({'Label':label,'ProgramArguments':[config['python'],str(self.base/'update_worker.py'),str(stage)],
                 'WorkingDirectory':str(self.base),'RunAtLoad':True,'KeepAlive':False,'Umask':0o077,
                 'StandardOutPath':str(stage/'update.log'),'StandardErrorPath':str(stage/'update.log')}));job.chmod(0o600)
+            # Persist before launching: failed or interrupted attempts never auto-loop, even after restart.
+            save(self.attempt_path,{'version':version,'automatic':automatic,'attempted_at':time.time()})
             save(self.status_path,state|{'available':False,'installing':True,'message':'Update scheduled. The dashboard will briefly disconnect.'})
-            result=subprocess.run(['/bin/launchctl','bootstrap',f'gui/{os.getuid()}',str(job)],capture_output=True,timeout=15)
+            try:
+                result=subprocess.run(['/bin/launchctl','bootstrap',f'gui/{os.getuid()}',str(job)],capture_output=True,timeout=15)
+            except (OSError,subprocess.TimeoutExpired) as exc:
+                # A timeout can mean launchd accepted the job. Keep installation latched.
+                save(self.status_path,state|{'available':False,'installing':True,
+                    'message':'Updater launch could not be confirmed. Check the Mac before retrying; automatic installation is held.'})
+                raise ValueError('Updater launch could not be confirmed') from exc
             if result.returncode:
                 save(self.status_path,state|{'message':'macOS could not launch the updater; bot unchanged.'})
                 raise ValueError('macOS could not launch the independent updater')
 
+    def tick(self):
+        state=self.state()
+        if not state['configured'] or state['busy'] or state.get('installing'):return
+        if (state['automatic'] and state.get('available') and automatic_window()
+                and state.get('automatic_attempted_version')!=state.get('version')
+                and not (self.base/'data'/'update_hold').exists()):
+            self.install(state['version'],automatic=True)
+            return
+        if time.time()-self.last_check>86400:self.check()
+
     def worker(self,stop):
         while not stop.wait(60):
-            if self.state()['configured'] and time.time()-self.last_check>86400:
-                try:self.check()
-                except ValueError:pass
+            try:self.tick()
+            except Exception:
+                # Disk/network/launch errors must not kill the update monitor.
+                # Install attempts remain durably latched; checks retry the next day.
+                pass

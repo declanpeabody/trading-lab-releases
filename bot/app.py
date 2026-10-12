@@ -123,6 +123,7 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
                 elif self.path == '/api/updates' and updates:
                     if payload.get('action')=='check':updates.check()
                     elif payload.get('action')=='install':updates.install(payload['version'])
+                    elif payload.get('action')=='automatic':updates.set_automatic(payload['enabled'])
                     elif payload.get('action')=='configure':updates.configure(payload['repo'],payload['public_key'])
                     else:raise ValueError('Unknown update control')
                 elif self.path == '/api/control':

@@ -1,3 +1,17 @@
+# Automatic-update validation — 2026.10.12.2
+
+20 focused updater tests passed locally. Coverage includes signed release and
+hash rejection, backup rollback, opt-in persistence, New York window boundaries
+including daylight-saving time, failed/uncertain launch latching, restart
+persistence, manual retry, installation holds and exact staged-version checks.
+JavaScript syntax and Python compilation passed. The complete regression suite
+also gates publication through GitHub Actions.
+
+Launchd, an actual unattended Mac restart and recovery after power loss cannot
+be exercised in this Linux environment. No live paper account was accessed.
+
+---
+
 # Expanded-universe validation — 2026.10.12.1
 
 117 automated tests passed locally with synthetic data.
