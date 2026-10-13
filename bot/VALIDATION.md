@@ -1,3 +1,13 @@
+## 2026.10.13.4 forward experiment coverage
+
+Tests cover separate persistent books and untouched active capital; immutable
+purchase bands; shared quote ceilings; paused/blocked controls; missing/invalid
+snapshots; duplicate suppression; split-basis invalidation; observed intraday
+drawdown; frozen development selection and independent forward accounts; minimum
+coverage/trades/return/drawdown gates; verified and expiring promotion evidence;
+flat-account and risk-block conditions; rollback; authenticated CSRF controls and
+exports. These tests verify mechanics, not predictive performance or profitability.
+
 ## 2026.10.13.2 regression coverage
 
 Stock split/reverse split guard, exactly-once verified reconciliation, legacy basis

@@ -8,7 +8,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from app import handler_factory
 from engine import Ledger
-from research import Research
+from research import Research, Experiments
 from updater import Updates
 from ranked_scanner import Journal
 from unittest.mock import patch
@@ -20,8 +20,9 @@ class DashboardTests(unittest.TestCase):
         self.ledger = Ledger(self.temp.name+'/test.db')
         self.research = Research(self.temp.name)
         self.updates = Updates(self.temp.name)
+        self.experiments = Experiments(self.temp.name)
         self.server = ThreadingHTTPServer(('127.0.0.1',0), handler_factory(
-            self.ledger,'tester','a-test-password-with-entropy',threading.current_thread(),self.research,updates=self.updates,journal=Journal(self.temp.name)))
+            self.ledger,'tester','a-test-password-with-entropy',threading.current_thread(),self.research,updates=self.updates,journal=Journal(self.temp.name),experiments=self.experiments))
         self.thread = threading.Thread(target=self.server.serve_forever,daemon=True)
         self.thread.start()
         self.base = 'http://127.0.0.1:'+str(self.server.server_port)
@@ -60,6 +61,21 @@ class DashboardTests(unittest.TestCase):
             with self.get('/api/state') as response:state=json.load(response)
             self.assertIn('saved API key contains',state['error'])
             self.assertNotIn('PRIVATE',json.dumps(state));request.assert_not_called()
+
+    def test_experiment_controls_require_auth_and_csrf(self):
+        with self.assertRaises(HTTPError):self.get('/api/experiments',False)
+        with self.get('/api/state') as r:token=json.load(r)['csrf']
+        headers={'Authorization':self.auth,'Content-Type':'application/json'}
+        req=lambda:Request(self.base+'/api/experiments',data=b'{"action":"automatic","enabled":false}',headers=headers)
+        with self.assertRaises(HTTPError) as error:urlopen(req(),timeout=2)
+        self.assertEqual(error.exception.code,403);self.assertTrue(self.experiments.state()['automatic'])
+        headers['X-CSRF-Token']=token
+        with urlopen(req(),timeout=2) as r:self.assertEqual(r.status,200)
+        self.assertFalse(self.experiments.state()['automatic'])
+        with self.get('/api/experiments/export') as r:
+            self.assertIn('attachment',r.headers['Content-Disposition'])
+            self.assertEqual(json.load(r)['active'],200)
+        self.assertTrue(self.ledger.read()['paused'])
 
     def test_control_requires_csrf_and_persists(self):
         with self.get('/api/state') as response: token=json.load(response)['csrf']

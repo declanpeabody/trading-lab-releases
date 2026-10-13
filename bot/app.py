@@ -14,7 +14,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 from engine import Ledger
 from market import Market, session_window, validate_key, MarketUnavailable
-from research import Research
+from research import Research, Experiments
 from ranked_scanner import RankedScanner, Journal
 from news import News
 from updater import Updates
@@ -40,7 +40,9 @@ def worker(ledger):
         delay=900
         WORKER={'state':'checking','message':'Checking worker and account','heartbeat':time.time(),'due':time.time()}
         try:
-            if scanner is None:scanner=RankedScanner(os.getenv('DATA_DIR','/data'))
+            if scanner is None:
+                directory=os.getenv('DATA_DIR','/data')
+                scanner=RankedScanner(directory,experiments=Experiments(directory))
             if not (Path(os.getenv('DATA_DIR','/data'))/'update_hold').exists() and not ledger.read()['paused'] and session_window(datetime.now(ZoneInfo('America/New_York'))):
                 try:scanner.cycle(ledger)
                 except ValueError as exc:ledger.fail(str(exc))
@@ -58,13 +60,13 @@ def worker(ledger):
 
 def top_navigation(path,nonce):
     links=[('/#overview','Overview'),('/#positions','Positions'),('/#scanner','Scanner'),('/#markets','Markets'),
-           ('/research','Research & Journal'),('/news','News'),('/#rules','Rules & Limits'),('/updates','Software Updates')]
+           ('/research','Research & Journal'),('/research#experiments','Strategy Experiments'),('/news','News'),('/#rules','Rules & Limits'),('/updates','Software Updates')]
     style='<style nonce="'+nonce+'">.top-nav{display:flex;flex-wrap:wrap;gap:8px;margin:20px 0;padding:0 0 16px;border-bottom:1px solid #2b3545}.top-nav a{display:inline-flex;align-items:center;min-height:44px;padding:10px 14px;border:1px solid #3f4d63;border-radius:7px;color:#c6d0df;background:#111925;text-decoration:none;font:600 13px system-ui}.top-nav a[aria-current]{color:#101620;background:#d8f36a;border-color:#d8f36a}.top-nav a:focus-visible{outline:3px solid #a8ceff;outline-offset:3px}</style>'
     return style+'<nav class="top-nav" aria-label="Dashboard navigation">'+''.join(
         '<a href="'+href+'"'+(' aria-current="page"' if href==path else '')+'>'+label.replace('&','&amp;')+'</a>' for href,label in links)+'</nav>'
 
 
-def handler_factory(ledger, username, password, thread, research=None, news=None, updates=None, journal=None):
+def handler_factory(ledger, username, password, thread, research=None, news=None, updates=None, journal=None, experiments=None):
     csrf = secrets.token_urlsafe(32)
     auth = 'Basic ' + base64.b64encode(f'{username}:{password}'.encode()).decode()
 
@@ -102,6 +104,9 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
                 except Exception:
                     self.respond(503,json.dumps({'error':'Account storage unavailable','worker':worker_health(thread)}));return
                 state['worker']=worker_health(thread)
+                if experiments:
+                    try:state['active_purchase_limit']=experiments.active_limit()
+                    except Exception:state['experiment_error']='Experiment settings unavailable; check Strategy Experiments.'
                 state['csrf'] = csrf
                 state['data_configured'] = bool(os.getenv('TWELVE_DATA_API_KEY'))
                 # Pure local validation also works outside trading hours. Never
@@ -110,6 +115,9 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
                     try:validate_key(os.environ['TWELVE_DATA_API_KEY'])
                     except MarketUnavailable as exc:state['error']=str(exc)
                 self.respond(200, json.dumps(state, allow_nan=False))
+            elif self.path in ('/api/experiments','/api/experiments/export') and experiments:
+                extra={'Content-Disposition':'attachment; filename="strategy-experiments.json"'} if self.path.endswith('/export') else None
+                self.respond(200,json.dumps(experiments.state(),allow_nan=False),extra=extra)
             elif self.path == '/api/research' and research:
                 self.respond(200, json.dumps(research.state(), allow_nan=False))
             elif self.path == '/api/news' and news:
@@ -141,7 +149,7 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
 
         def do_POST(self):
             if not self.authorized(): return
-            if self.path not in ('/api/control', '/api/research', '/api/news', '/api/updates'):
+            if self.path not in ('/api/control', '/api/research', '/api/news', '/api/updates', '/api/experiments'):
                 self.respond(404, '{"error":"Not found"}')
                 return
             if not hmac.compare_digest(self.headers.get('X-CSRF-Token',''),csrf):
@@ -152,7 +160,9 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
                 if not 0 < length <= (16000 if self.path=='/api/updates' else 1024): raise ValueError()
                 payload = json.loads(self.rfile.read(length))
                 if not isinstance(payload,dict):raise ValueError('Expected an object')
-                if self.path == '/api/research' and research:
+                if self.path == '/api/experiments' and experiments:
+                    experiments.control(payload['action'],payload.get('enabled'))
+                elif self.path == '/api/research' and research:
                     research.start(payload)
                 elif self.path == '/api/news' and news:
                     news.configure(payload)
@@ -194,7 +204,7 @@ def main():
     thread = threading.Thread(target=worker, args=(ledger,), daemon=True)
     thread.start()
     server = ThreadingHTTPServer((os.getenv('BIND_HOST', '127.0.0.1'), int(os.getenv('PORT','8080'))),
-        handler_factory(ledger,os.getenv('DASHBOARD_USER','declan'),password,thread,Research(directory),news,updates,Journal(directory)))
+        handler_factory(ledger,os.getenv('DASHBOARD_USER','declan'),password,thread,Research(directory),news,updates,Journal(directory),Experiments(directory)))
     print('Paper-trading dashboard ready; real-money execution is not implemented.', flush=True)
     try: server.serve_forever()
     finally:

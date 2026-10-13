@@ -14,8 +14,8 @@ from strategy import WATCHLIST, VERSION, rank_histories, candidates, assess, LIV
 
 class RankedScanner(Scanner):
     """Trade from previously prepared histories, then prepare the next bounded batch."""
-    def __init__(self, directory, market=None, clock=None, budget=None):
-        self.clock=clock;self.budget=budget
+    def __init__(self, directory, market=None, clock=None, budget=None, experiments=None):
+        self.clock=clock;self.budget=budget;self.experiments=experiments
         super().__init__(directory,market)
         self.journal=Journal(directory)
         self.daily_path=self.directory/'ranked-daily.json'
@@ -52,6 +52,9 @@ class RankedScanner(Scanner):
         try:return self._cycle(ledger)
         except Exception as exc:
             error=str(exc) if isinstance(exc,ValueError) else 'Cycle failed before completion'
+            if self.experiments:
+                try:self.experiments.miss(self.now('America/New_York').date().isoformat())
+                except Exception:pass
             if isinstance(exc,MarketUnavailable):self.status.setdefault('skipped',[]).append(str(exc))
             raise
         finally:
@@ -113,6 +116,21 @@ class RankedScanner(Scanner):
         grid=max(set(grids.values()),key=lambda g:(g[-1],sum(v==g for v in grids.values()),g)) if grids else None
         ready={s:valid[s] for s in valid if grids[s]==grid}
         ranked=rank_histories(ready);selected=candidates(ranked,held)
+        experiment_held=self.experiments.holdings() if self.experiments else []
+        extras=[s for s in experiment_held if s not in held]
+        if len(extras)>6:
+            self.experiments.invalidate('Evaluation stopped: divergent experiment holdings exceed the six shared quote slots. No promotion; review and restart the evaluation.')
+            experiment_held=[];extras=[]
+        # Six normal quote slots remain a hard ceiling; observer holdings share
+        # them with candidates. Existing account holdings retain priority credits.
+        requested=list(dict.fromkeys(extras+selected))[:6]
+        selected=[s for s in selected if s in requested]
+        if extras:notes.append('Experiment holdings share the six non-held quote slots; entry coverage may be reduced.')
+        for symbol in requested:
+            if symbol in experiment_held and symbol not in bars:
+                try:bars[symbol]=self._history(symbol,mapping,today)
+                except MarketUnavailable:raise
+                except (ValueError,KeyError,TypeError):notes.append(f'{symbol}: experiment history unavailable; comparison held.')
         self.status.update(ranking=ranked,ranking_date=today,ranking_complete=len(ready)==len(universe) and bool(universe),
             partial_ranking_allowed=True,rankable_symbols=list(ready),ranked_histories=len(ready),
             ranking_asof=grid[-1] if grid else None,selected=selected)
@@ -120,7 +138,7 @@ class RankedScanner(Scanner):
         self.audit['bars']=dict(bars)
         self.audit['at']=self.now('UTC').isoformat()
         raw={}
-        for symbol in held+selected:
+        for symbol in held+requested:
             try:
                 q=self.market.get('quote',priority=symbol in held,symbol=symbol,exchange=mapping[symbol],prepost='false')
                 if q.get('exchange')!=mapping[symbol]:raise ValueError('Quote exchange mismatch')
@@ -135,7 +153,7 @@ class RankedScanner(Scanner):
                 try:
                     p=quote(q,symbol,stamp,'USD')
                     if q.get('is_extended_hours') is True:raise ValueError('Extended hours disabled')
-                    if symbol not in held and p<1:raise ValueError('Price below $1')
+                    if symbol not in held and symbol not in experiment_held and p<1:raise ValueError('Price below $1')
                     prices[symbol]=p
                 except (ValueError,KeyError,TypeError) as exc:
                     if symbol in held:raise ValueError(f'Held stock {symbol}: invalid quote; decisions blocked this cycle.') from None
@@ -144,9 +162,29 @@ class RankedScanner(Scanner):
             if not session_window(self.now('America/New_York')):raise ValueError('Session ended; no decisions this cycle.')
             self.audit['prices']=prices;self.status['checked']=list(prices)
             if prices:
-                histories={s:[float(r['close']) for r in bars[s]] for s in prices}
-                self.audit['decisions']=ledger.cycle(prices,histories,fx,today,self.audit['at'],symbols=list(prices),history_rows=bars) or []
+                entry_symbols=[s for s in selected if prices.get(s,1)>=1]
+                active_prices={s:p for s,p in prices.items() if s in held or s in entry_symbols}
+                histories={s:[float(r['close']) for r in bars[s]] for s in active_prices}
+                limit=self.experiments.active_limit() if self.experiments else 200
+                self.status['active_purchase_limit']=limit
+                if active_prices:
+                    self.audit['decisions']=ledger.cycle(active_prices,histories,fx,today,self.audit['at'],symbols=list(active_prices),history_rows=bars,purchase_limit=limit) or []
+                else:
+                    with ledger.lock:
+                        state=ledger.read()
+                        state.update(last_check=self.audit['at'],error='No valid ranked candidate quotes; see scanner coverage.' if selected else None)
+                        ledger.write(state)
+                live=ledger.read()
+                if self.experiments and not live['paused'] and not live.get('error'):
+                    try:
+                        self.experiments.observe(prices,bars,fx,today,self.audit['at'],entry_symbols,buy_block=live['buy_block'])
+                        self.experiments.promote(ledger,today)
+                    except Exception:
+                        notes.append('Experiment storage/processing unavailable; no promotion confirmed. Active paper decisions already recorded.')
+                        try:self.experiments.miss(today)
+                        except Exception:pass
         if not self.status['checked']:
+            if self.experiments:self.experiments.miss(today)
             with ledger.lock:
                 message=('No valid ranked candidate quotes; see scanner coverage.' if selected else None)
                 self.status['decision_state']='data_blocked' if selected else 'warming_up' if not ready else 'no_eligible_candidates'
@@ -239,7 +277,7 @@ class Journal:
                 elif symbol not in prices:action,reason='SKIP','Fresh valid quote unavailable'
                 else:action,reason='NOT_EVALUATED','Account paused or cycle not completed'
                 body=dict(scan_id=scan,at=stamp,day=day,symbol=symbol,strategy_version=status.get("version",VERSION),
-                    action=action,reason=reason,rank=ranks.get(symbol),features=features,
+                    action=action,reason=reason,rank=ranks.get(symbol),features=features,purchase_limit=status.get('active_purchase_limit',200),
                     selected=symbol in selected,held_before=symbol in held,
                     quote_usd=prices.get(symbol),reference_day=rows[-1]['datetime'][:10] if rows else None,
                     prior_close=features['prior_close'] if features else None,

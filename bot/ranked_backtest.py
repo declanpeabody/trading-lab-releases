@@ -270,5 +270,5 @@ def run_batched(series,mapping,start,end,slippage_bps=25,fx_fee_bps=15,normal_li
             'Fresh synthetic quotes are assumed when a daily bar exists. Provider outages, real request durations, holidays without bars and quota changes cannot be reconstructed. Coverage and blocked checks are included in the JSON export.',
             'Uses split-adjusted bars consistently, excludes dividends/tax/corporate-action cash flows, and holds any corporate-action verification flags unresolved. Live account reconciliation is not simulated.',
             'Daily closing valuation uses the prior FX close; missing held bars retain the previous mark and are identified in coverage. Last session liquidates with modelled costs.',
-            'This is an additional research mode; it does not train, optimise or change the running paper account.',
+            'This replay uses the fixed £200 purchase setting. Prospective experiment accounts and automatic promotions are not replayed; this report cannot qualify a promotion.',
         ])

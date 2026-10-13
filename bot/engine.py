@@ -66,6 +66,15 @@ def signal(closes, price):
     return 'buy' if price > fast > slow else ('sell' if price < fast else 'hold')
 
 
+def new_paper_state(initial_cash=PAPER_CAPITAL):
+    return dict(mode='paper', paused=True, buy_block=False, risk_latched=False,
+                       cash=initial_cash, equity=initial_cash, positions={},
+                       contributed_capital=initial_cash,
+                       last_buy={}, day='', day_start=initial_cash,
+                       last_check=None, last_success=None, error=None,
+                       marks={}, fx=None, signals={}, day_block=False)
+
+
 class Ledger:
     def __init__(self, path, initial_cash=PAPER_CAPITAL, price_allowance=PRICE_ALLOWANCE, fx_allowance=FX_ALLOWANCE):
         initial_cash = positive(initial_cash)
@@ -77,12 +86,7 @@ class Ledger:
         self.db.execute('PRAGMA synchronous=FULL')
         self.db.execute('CREATE TABLE IF NOT EXISTS ledger (id INTEGER PRIMARY KEY CHECK(id=1), body TEXT NOT NULL)')
         self.db.execute('CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, at TEXT NOT NULL, message TEXT NOT NULL)')
-        initial = dict(mode='paper', paused=True, buy_block=False, risk_latched=False,
-                       cash=initial_cash, equity=initial_cash, positions={},
-                       contributed_capital=initial_cash,
-                       last_buy={}, day='', day_start=initial_cash,
-                       last_check=None, last_success=None, error=None,
-                       marks={}, fx=None, signals={}, day_block=False)
+        initial = new_paper_state(initial_cash)
         with self.db:
             self.db.execute('INSERT OR IGNORE INTO ledger VALUES (1,?)', (json.dumps(initial),))
             state = json.loads(self.db.execute('SELECT body FROM ledger WHERE id=1').fetchone()[0])
@@ -168,8 +172,10 @@ class Ledger:
             else:p['basis_reference']=reference
         return blocked
 
-    def cycle(self, prices, histories, fx, date, stamp, symbols=None, history_rows=None):
+    def cycle(self, prices, histories, fx, date, stamp, symbols=None, history_rows=None, purchase_limit=MAX_POSITION):
         # Validate the complete snapshot before touching cash or holdings.
+        if type(purchase_limit) not in (int,float) or purchase_limit not in (100,150,200):
+            raise ValueError('Purchase setting must be £100, £150 or £200; safety cap is fixed')
         fx = positive(fx)
         symbols = tuple(SYMBOLS if symbols is None else symbols)
         if not symbols or len(set(symbols)) != len(symbols):
@@ -220,13 +226,13 @@ class Ledger:
                       and not s['risk_latched'] and not s['day_block']
                       and s['last_buy'].get(symbol) != date):
                     unit_cost = prices[symbol] * (1+self.price_allowance) * fx * (1+self.fx_allowance)
-                    budget = min(MAX_POSITION, s['cash'])
+                    budget = min(purchase_limit, MAX_POSITION, s['cash'])
                     qty = math.floor(budget / unit_cost * 1_000_000) / 1_000_000
                     cost = qty * unit_cost
                     if qty <= 0 or cost < 1:
                         decisions.append(dict(symbol=symbol,action="SKIP",reason="Insufficient cash / fractional precision"))
                         continue
-                    if cost > MAX_POSITION + 1e-8 or cost > s['cash'] + 1e-8:
+                    if cost > min(MAX_POSITION,purchase_limit) + 1e-8 or cost > s['cash'] + 1e-8:
                         raise ValueError('Budget check failed')
                     action,reason='BUY','Trend entry; controls and budget passed'
                     s['cash'] -= cost
