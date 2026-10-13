@@ -24,13 +24,13 @@ WARNINGS=[
 def parse_series(data,symbol):
     meta=data.get('meta',{})
     if meta.get('symbol')!=symbol:raise ValueError('Historical symbol mismatch')
-    if symbol in WATCHLIST and meta.get('currency')!='USD':raise ValueError('Historical stock currency must be USD')
+    if symbol!='USD/GBP' and meta.get('currency')!='USD':raise ValueError('Historical stock currency must be USD')
     out={}
     for row in data.get('values',[]):
         day=date.fromisoformat(row['datetime'][:10]).isoformat()
         if day in out:raise ValueError('Duplicate historical date')
         value={'open':positive(row['open']),'close':positive(row['close'])}
-        if symbol in WATCHLIST:
+        if symbol!='USD/GBP':
             volume=float(row['volume'])
             if not math.isfinite(volume) or volume<0:raise ValueError('Invalid historical volume')
             value['volume']=volume
@@ -152,4 +152,123 @@ def walk_forward(series,start,end,slippage_bps=25,fx_fee_bps=15):
             'Three predeclared purchase sizes are tested. Training uses net return minus half the maximum drawdown, not maximum raw profit.',
             'Forward-test variants share observations. Comparisons are correlated; a winning window or a small number of trades is weak evidence.',
             'Costs, warm-up, current-watchlist bias and daily approximations are identical to the ordinary historical test. No machine learning is trained.',
+        ])
+
+
+def run_batched(series,mapping,start,end,slippage_bps=25,fx_fee_bps=15,normal_limit=500,priority_limit=700):
+    """Run the actual scanner and paper ledger against an explicit synthetic tape.
+
+    Daily OHLC cannot reconstruct intraday quotes. Every synthetic check uses that
+    session's open and prior FX close; the report names this limitation prominently.
+    No network requests, global clock patches or writes to the live account.
+    """
+    import tempfile
+    from pathlib import Path
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    from engine import Ledger
+    from ranked_scanner import RankedScanner
+    from strategy import screening_universe, LIVE_VERSION
+    from market import session_window
+    dates(start,end)
+    universe=screening_universe(mapping)
+    if not universe:raise ValueError('No supported stocks for scanner replay')
+    if not 0<=normal_limit<=priority_limit<=700:raise ValueError('Invalid replay request limits')
+    days=sorted({d for s in universe for d in series.get(s,{}) if start<=d<=end and date.fromisoformat(d).weekday()<5})
+    if len(days)<20:raise ValueError('Scanner replay needs at least 20 sessions')
+    fxseries=series.get('USD/GBP',{})
+    class Tape:
+        def __init__(self):self.current=None;self.count=0
+        def now(self,zone):return self.current.astimezone(ZoneInfo(zone))
+        def timestamp(self):return self.current.timestamp()
+        def used(self):return self.count
+        def get(self,endpoint,priority=False,**params):
+            if self.count>=(priority_limit if priority else normal_limit):
+                raise ValueError('Local daily API budget reached in replay')
+            self.count+=1;self.current+=timedelta(seconds=8)
+            day=self.now('America/New_York').date().isoformat();symbol=params.get('symbol')
+            if endpoint=='stocks':
+                return {'data':[{'symbol':s,'exchange':mapping[s],'country':'United States','currency':'USD','type':'Common Stock'} for s in mapping]}
+            data=series.get(symbol,{})
+            past=sorted(d for d in data if d<day)
+            if endpoint=='time_series':
+                return {'meta':{'symbol':symbol,'exchange':mapping[symbol],'currency':'USD'},
+                    'values':[{'datetime':d,**data[d]} for d in past[-60:]]}
+            if endpoint=='quote':
+                if symbol=='USD/GBP':
+                    if not past or (date.fromisoformat(day)-date.fromisoformat(past[-1])).days>4:raise ValueError('Prior FX history missing or stale')
+                    price=data[past[-1]]['close']
+                else:
+                    if day not in data:raise ValueError('Synthetic quote unavailable: missing daily bar')
+                    price=data[day]['open']
+                return {'symbol':symbol,'exchange':mapping.get(symbol),'currency':'USD',
+                    'close':price,'last_quote_at':self.timestamp(),'is_market_open':session_window(self.current),
+                    'is_extended_hours':False}
+            raise ValueError('Unsupported replay endpoint')
+    tape=Tape();trades=[];curve=[];coverage=[];failures=[]
+    slip=float(slippage_bps)/10000;fee=float(fx_fee_bps)/10000
+    with tempfile.TemporaryDirectory(prefix='paper-scanner-replay-') as folder:
+        ledger=Ledger(Path(folder)/'paper.sqlite3',price_allowance=slip,fx_allowance=fee)
+        try:
+            ledger.control('start');scanner=RankedScanner(folder,tape,clock=tape,budget=tape)
+            for day in days:
+                tape.current=datetime.fromisoformat(day+'T09:30:00').replace(tzinfo=ZoneInfo('America/New_York'));tape.count=0
+                scans=0;ready=0;blocked=0
+                while session_window(tape.current):
+                    before=ledger.read();scanner.audit={'bars':{},'prices':{},'decisions':[],'before':before}
+                    try:scanner._cycle(ledger)
+                    except (ValueError,KeyError,TypeError) as exc:
+                        ledger.fail(str(exc));blocked+=1
+                        if len(failures)<100:failures.append({'date':day,'scan':scans+1,'reason':str(exc)})
+                    after=ledger.read();prices=scanner.audit['prices'];fx=after['fx']
+                    for action in scanner.audit['decisions']:
+                        symbol=action['symbol'];side=action['action']
+                        if side=='NOT_EVALUATED':blocked+=1
+                        if side not in ('BUY','SELL'):continue
+                        price=prices[symbol]
+                        p=(after if side=='BUY' else before)['positions'][symbol];qty=p['qty']
+                        gross=qty*price*fx
+                        net=-p['cost_gbp'] if side=='BUY' else gross*(1-slip)*(1-fee)
+                        trades.append(dict(date=day,symbol=symbol,side=side,quantity=qty,
+                            price_usd=price*(1+slip if side=='BUY' else 1-slip),fx_gbp_per_usd=fx,net_gbp=net,
+                            cost_gbp=(-net-gross if side=='BUY' else gross-net),
+                            pnl_gbp=None if side=='BUY' else net-p['cost_gbp'],reason=action['reason']))
+                    ready=max(ready,scanner.status.get('ranked_histories',0));scans+=1
+                    tape.current+=timedelta(seconds=900)
+                state=ledger.read();prior=sorted(d for d in fxseries if d<day)
+                if not prior or (date.fromisoformat(day)-date.fromisoformat(prior[-1])).days>4:
+                    raise ValueError('Missing/stale prior-session FX for portfolio valuation')
+                fx=positive(fxseries[prior[-1]]['close']);equity=state['cash'];missing=[]
+                for symbol,p in state['positions'].items():
+                    if day not in series.get(symbol,{}):missing.append(symbol)
+                    price=series.get(symbol,{}).get(day,{}).get('close',state['marks'].get(symbol))
+                    if price is None:raise ValueError('Held-stock valuation unavailable')
+                    equity+=p['qty']*price*fx
+                    if day==days[-1]:
+                        gross=p['qty']*price*fx;net=gross*(1-slip)*(1-fee);equity-=gross-net
+                        trades.append(dict(date=day,symbol=symbol,side='SELL',quantity=p['qty'],price_usd=price*(1-slip),
+                            fx_gbp_per_usd=fx,net_gbp=net,cost_gbp=gross-net,pnl_gbp=net-p['cost_gbp'],reason='End-of-test liquidation'))
+                curve.append({'date':day,'equity':equity,'cash':equity if day==days[-1] else state['cash'],
+                    'positions':0 if day==days[-1] else len(state['positions'])})
+                coverage.append({'date':day,'checks':scans,'api_attempts':tape.count,'ranked_max':ready,
+                    'prepared':scanner.status.get('histories_ready',0),'blocked_checks_or_positions':blocked,'stale_valuation_symbols':missing})
+        finally:ledger.db.close()
+    cashcurve=[{'date':d,'equity':PAPER_CAPITAL,'cash':PAPER_CAPITAL,'positions':0} for d in days]
+    return dict(schema_version=3,research_mode='scanner_replay',labels={'strategy':'Batched scanner · synthetic open quotes','cash':'Cash'},
+        strategy_settings=settings(),strategy_version=LIVE_VERSION,requested_start=start,requested_end=end,
+        start=days[0],end=days[-1],sessions=len(days),symbols=universe,initial_gbp=PAPER_CAPITAL,
+        slippage_bps=slippage_bps,fx_fee_bps=fx_fee_bps,coverage=coverage,replay_errors=failures,
+        replay_assumptions={'quote':'same session open at every synthetic check','fx':'prior daily close',
+            'request_seconds':8,'wait_seconds':900,'normal_limit':normal_limit,'priority_limit':priority_limit,'initial_cursor':0},
+        comparisons={'strategy':{'metrics':metrics(curve,trades,days[0],days[-1],PAPER_CAPITAL),'curve':curve,'trades':trades},
+            'cash':{'metrics':metrics(cashcurve,[],days[0],days[-1],PAPER_CAPITAL),'curve':cashcurve,'trades':[]}},
+        warnings=[
+            'Synthetic daily-price replay, not an intraday backtest or evidence of live profitability. Every check uses the SAME session open; real price paths, spreads and quote delays are unknown.',
+            'Runs the current scanner and paper ledger: stable up-to-300 universe, prior-session ranking, partial coverage, persistent batch cursor, 20-history batches, eight seconds per request, 15-minute waits and daily request budgets. Histories prepared after decisions enter the next check only.',
+            'Universe uses the catalogue selected today: survivorship and selection bias remain. Missing stock histories are retained as unavailable candidates, not removed from the universe.',
+            'Starts at £1,000 with empty holdings and cache. Research downloads consume real shared credits; simulated requests do not. Other apps and research usage are not included in the simulated daily budget.',
+            'Fresh synthetic quotes are assumed when a daily bar exists. Provider outages, real request durations, holidays without bars and quota changes cannot be reconstructed. Coverage and blocked checks are included in the JSON export.',
+            'Uses split-adjusted bars consistently, excludes dividends/tax/corporate-action cash flows, and holds any corporate-action verification flags unresolved. Live account reconciliation is not simulated.',
+            'Daily closing valuation uses the prior FX close; missing held bars retain the previous mark and are identified in coverage. Last session liquidates with modelled costs.',
+            'This is an additional research mode; it does not train, optimise or change the running paper account.',
         ])

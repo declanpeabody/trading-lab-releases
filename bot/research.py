@@ -6,10 +6,11 @@ import io
 import json
 from pathlib import Path
 import threading
-from ranked_backtest import dates, parse_series, run, walk_forward
-from strategy import WATCHLIST
+from ranked_backtest import dates, parse_series, run, walk_forward, run_batched
+from strategy import WATCHLIST, screening_universe
 from scanner import catalogue
-from market import Market
+from market import Market, MarketUnavailable
+from mac_update import prune_files
 
 class Research:
     def __init__(self, directory):
@@ -28,7 +29,7 @@ class Research:
         if not isinstance(options,dict):raise ValueError('Invalid research options.')
         start,end=str(options.get('start','')),str(options.get('end',''))
         mode=options.get('mode','historical')
-        if mode not in ('historical','walk_forward'):raise ValueError('Unknown research mode')
+        if mode not in ('historical','walk_forward','scanner_replay'):raise ValueError('Unknown research mode')
         dates(start,end)
         slip=float(options.get('slippage_bps',25));fee=float(options.get('fx_fee_bps',15))
         if not (0<=slip<=200 and 0<=fee<=200):raise ValueError('Cost allowances must be 0–200 basis points.')
@@ -42,24 +43,32 @@ class Research:
             a,b=dates(start,end);warm=(a-timedelta(days=150)).isoformat()
             data={};provenance={};market=Market()
             mapping=catalogue(market.get('stocks',country='United States',type='Common Stock')['data'])
-            if not all(s in mapping for s in WATCHLIST):raise ValueError('Watchlist exchange mappings incomplete; no test run.')
-            for symbol in (*WATCHLIST,'USD/GBP'):
+            if mode!='scanner_replay' and not all(s in mapping for s in WATCHLIST):raise ValueError('Watchlist exchange mappings incomplete; no test run.')
+            symbols=screening_universe(mapping) if mode=='scanner_replay' else WATCHLIST
+            unavailable={}
+            for symbol in (*symbols,'USD/GBP'):
                 token=hashlib.sha256(f'{symbol}|{mapping.get(symbol)}|{warm}|{end}|splits|rank-v1'.encode()).hexdigest()
                 cache=self.directory/(token+'.cache.json')
-                if cache.exists() and not refresh:
-                    bundle=json.loads(cache.read_text())
-                else:
-                    extra={'exchange':mapping[symbol]} if symbol in mapping else {}
-                    raw=market.get('time_series',symbol=symbol,**extra,interval='1day',start_date=warm,
-                        end_date=end,outputsize=5000,adjust='splits',order='asc')
-                    parse_series(raw,symbol)
-                    if symbol in mapping and raw.get('meta',{}).get('exchange')!=mapping[symbol]:raise ValueError('Historical exchange mismatch')
-                    bundle={'retrieved_at':datetime.now(timezone.utc).isoformat(),'raw':raw}
-                    self._save(cache,bundle)
-                data[symbol]=parse_series(bundle['raw'],symbol)
-                provenance[symbol]={'retrieved_at':bundle['retrieved_at'],
-                    'sha256':hashlib.sha256(json.dumps(bundle['raw'],sort_keys=True).encode()).hexdigest()}
-            report=run(data,start,end,slip,fee)
+                try:
+                    if cache.exists() and not refresh:
+                        bundle=json.loads(cache.read_text())
+                    else:
+                        extra={'exchange':mapping[symbol]} if symbol in mapping else {}
+                        raw=market.get('time_series',symbol=symbol,**extra,interval='1day',start_date=warm,
+                            end_date=end,outputsize=5000,adjust='splits',order='asc')
+                        parse_series(raw,symbol)
+                        if symbol in mapping and raw.get('meta',{}).get('exchange')!=mapping[symbol]:raise ValueError('Historical exchange mismatch')
+                        bundle={'retrieved_at':datetime.now(timezone.utc).isoformat(),'raw':raw}
+                        self._save(cache,bundle)
+                    data[symbol]=parse_series(bundle['raw'],symbol)
+                    provenance[symbol]={'retrieved_at':bundle['retrieved_at'],
+                        'sha256':hashlib.sha256(json.dumps(bundle['raw'],sort_keys=True).encode()).hexdigest()}
+                except MarketUnavailable:raise
+                except (ValueError,KeyError,TypeError) as exc:
+                    if mode!='scanner_replay' or symbol=='USD/GBP' or 'Local daily API budget' in str(exc):raise
+                    data[symbol]={};unavailable[symbol]=str(exc)[:200]
+            report=run_batched(data,mapping,start,end,slip,fee) if mode=='scanner_replay' else run(data,start,end,slip,fee)
+            if mode=='scanner_replay':report['unavailable_histories']=unavailable
             if mode=="walk_forward":
                 report["walk_forward"]=walk_forward(data,start,end,slip,fee)
                 report['warnings']=[w for w in report['warnings'] if 'No optimisation' not in w]
@@ -76,6 +85,10 @@ class Research:
         except Exception:
             with self.lock:self.error='Research failed; check the data connection and available disk space. Paper account unchanged.'
         finally:
+            try:
+                prune_files(self.directory,'*.report.json',10,50_000_000)
+                prune_files(self.directory,'*.cache.json',400,200_000_000)
+            except OSError:pass
             with self.lock:self.busy=False
 
     @staticmethod

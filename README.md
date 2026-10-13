@@ -1,3 +1,12 @@
+# Reliability update — version 2026.10.13.2
+
+Install through Software Updates, or your opted-in automatic updater.
+See [release notes](release-notes.md) for the seven changes, retention limits,
+manual corporate-action verification and the synthetic scanner replay limits.
+The release does not change the free plan or paper trading limits.
+
+---
+
 # Market-data recovery — version 2026.10.13.1
 
 Install through Software Updates or automatic updates. At the next scheduled
@@ -19,7 +28,7 @@ must reset before screening can resume.
 # Declan's Trading Lab releases
 
 Public source and signed updates for a **paper-only** Mac trading research bot.
-It cannot submit real-money broker orders. Source version: **2026.10.12.1**. Live screening targets 300 supported US stocks.
+It cannot submit real-money broker orders. Source version: **2026.10.13.2**. Live screening targets 300 supported US stocks.
 
 The source, synthetic regression tests and an automatic release workflow are
 included. The release channel is active. The owner has completed signing setup; future

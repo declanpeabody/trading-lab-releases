@@ -14,7 +14,8 @@ from strategy import WATCHLIST, VERSION, rank_histories, candidates, assess, LIV
 
 class RankedScanner(Scanner):
     """Trade from previously prepared histories, then prepare the next bounded batch."""
-    def __init__(self, directory, market=None):
+    def __init__(self, directory, market=None, clock=None, budget=None):
+        self.clock=clock;self.budget=budget
         super().__init__(directory,market)
         self.journal=Journal(directory)
         self.daily_path=self.directory/'ranked-daily.json'
@@ -31,12 +32,21 @@ class RankedScanner(Scanner):
             for symbol in retry:self.daily['errors'].pop(symbol,None)
             self.save_daily()
 
+    def now(self, zone):
+        return self.clock.now(zone) if self.clock else datetime.now(ZoneInfo(zone))
+
+    def timestamp(self):
+        return self.clock.timestamp() if self.clock else time.time()
+
+    def monotonic(self):
+        return self.clock.timestamp() if self.clock else time.monotonic()
+
     def save_daily(self):
         tmp=self.daily_path.with_suffix('.tmp')
         tmp.write_text(json.dumps(self.daily,allow_nan=False));tmp.chmod(0o600);tmp.replace(self.daily_path)
 
     def cycle(self, ledger):
-        if not session_window(datetime.now(ZoneInfo('America/New_York'))) or ledger.read()['paused']:return
+        if not session_window(self.now('America/New_York')) or ledger.read()['paused']:return
         self.audit={'bars':{},'prices':{},'decisions':[],'before':ledger.read()}
         error=None
         try:return self._cycle(ledger)
@@ -46,8 +56,8 @@ class RankedScanner(Scanner):
             raise
         finally:
             try:
-                self.journal.record(self.audit.get('at',datetime.now(ZoneInfo('UTC')).isoformat()),
-                    datetime.now(ZoneInfo('America/New_York')).date().isoformat(),self.audit,self.status,error)
+                self.journal.record(self.audit.get('at',self.now('UTC').isoformat()),
+                    self.now('America/New_York').date().isoformat(),self.audit,self.status,error)
             except Exception:
                 self.status.setdefault('skipped',[]).append('Decision journal write failed; paper decisions were not changed.')
 
@@ -60,18 +70,18 @@ class RankedScanner(Scanner):
         return sorted([r for r in raw['values'] if r['datetime'][:10]<today],key=lambda r:r['datetime'])[-50:]
 
     def _cycle(self,ledger):
-        today=datetime.now(ZoneInfo('America/New_York')).date().isoformat()
+        today=self.now('America/New_York').date().isoformat()
         held=list(ledger.read()['positions']);notes=[]
         self.status=dict(mode='Batched 300-stock target · US regular hours',version=LIVE_VERSION,
             target_count=UNIVERSE_TARGET,universe_count=0,selected=[],checked=[],skipped=notes,ranking=[])
         cached=screening_universe(self.state['universe'])
         self.status.update(universe_count=len(cached),universe_symbols=cached)
-        if time.time()-self.state['fetched']>7*86400:
+        if self.timestamp()-self.state['fetched']>7*86400:
             try:
                 universe=catalogue(self.market.get('stocks',country='United States',type='Common Stock')['data'])
                 if not universe:raise ValueError('Empty catalogue')
                 self.state.setdefault('known',{}).update(universe)
-                self.state.update(universe=universe,fetched=time.time());self.save()
+                self.state.update(universe=universe,fetched=self.timestamp());self.save()
             except MarketUnavailable:raise
             except (ValueError,KeyError,TypeError) as exc:notes.append(f'Catalogue unavailable; using cached mappings. {exc}')
         mapping=LEGACY|self.state.get('known',{})|self.state['universe']
@@ -79,7 +89,8 @@ class RankedScanner(Scanner):
         self.status.update(universe_count=len(universe),universe_symbols=universe,catalogue_at=self.state['fetched'])
         if len(universe)<UNIVERSE_TARGET:notes.append(f'Catalogue currently provides {len(universe)} of the 300 target stocks.')
         if self.daily.get('day')!=today or self.daily.get('version')!=LIVE_VERSION:
-            self.daily={'day':today,'version':LIVE_VERSION,'bars':{},'attempted':[],'errors':{}}
+            previous=self.daily.get('bars',{}) if self.daily.get('version')==LIVE_VERSION else {}
+            self.daily={'day':today,'version':LIVE_VERSION,'bars':{},'attempted':[],'errors':{},'previous_bars':previous}
         bars=self.daily['bars'];attempted=set(self.daily['attempted'])
         self.status.update(histories_ready=sum(s in bars for s in universe),
             history_failures=dict(self.daily['errors']),histories_pending=sum(s not in bars and s not in attempted for s in universe))
@@ -107,7 +118,7 @@ class RankedScanner(Scanner):
             ranking_asof=grid[-1] if grid else None,selected=selected)
         if len(ready)<len(universe):notes.append('Partial ranking: only ready stocks are eligible; the rest wait for valid history.')
         self.audit['bars']=dict(bars)
-        self.audit['at']=datetime.now(ZoneInfo('UTC')).isoformat()
+        self.audit['at']=self.now('UTC').isoformat()
         raw={}
         for symbol in held+selected:
             try:
@@ -119,7 +130,7 @@ class RankedScanner(Scanner):
                 if symbol in held:raise ValueError(f'Held stock {symbol}: quote unavailable; decisions blocked this cycle.') from None
                 notes.append(f'{symbol}: {exc}')
         if raw:
-            fxdata=self.market.get('quote',priority=bool(held),symbol='USD/GBP');stamp=time.time();prices={}
+            fxdata=self.market.get('quote',priority=bool(held),symbol='USD/GBP');stamp=self.timestamp();prices={}
             for symbol,q in raw.items():
                 try:
                     p=quote(q,symbol,stamp,'USD')
@@ -130,21 +141,23 @@ class RankedScanner(Scanner):
                     if symbol in held:raise ValueError(f'Held stock {symbol}: invalid quote; decisions blocked this cycle.') from None
                     notes.append(f'{symbol}: {exc}')
             fx=quote(fxdata,'USD/GBP',stamp)
-            if not session_window(datetime.now(ZoneInfo('America/New_York'))):raise ValueError('Session ended; no decisions this cycle.')
+            if not session_window(self.now('America/New_York')):raise ValueError('Session ended; no decisions this cycle.')
             self.audit['prices']=prices;self.status['checked']=list(prices)
             if prices:
                 histories={s:[float(r['close']) for r in bars[s]] for s in prices}
-                self.audit['decisions']=ledger.cycle(prices,histories,fx,today,self.audit['at'],symbols=list(prices)) or []
-        else:
+                self.audit['decisions']=ledger.cycle(prices,histories,fx,today,self.audit['at'],symbols=list(prices),history_rows=bars) or []
+        if not self.status['checked']:
             with ledger.lock:
-                state=ledger.read();state.update(last_check=self.audit['at'],error=None);ledger.write(state)
+                message=('No valid ranked candidate quotes; see scanner coverage.' if selected else None)
+                self.status['decision_state']='data_blocked' if selected else 'warming_up' if not ready else 'no_eligible_candidates'
+                state=ledger.read();state.update(last_check=self.audit['at'],error=message);ledger.write(state)
         # Decisions finish first. New histories only enter the NEXT scan's ranking.
         # Preserve the cursor across days/restarts so quota limits cannot starve the tail.
-        cursor=self.state.get('screen_cursor',0);visited=0;batch=[];deadline=time.monotonic()+180
-        budget=ApiBudget(self.directory);shared_failure=None
+        cursor=self.state.get('screen_cursor',0);visited=0;batch=[];deadline=self.monotonic()+180
+        budget=self.budget or ApiBudget(self.directory);shared_failure=None
         while universe and visited<len(universe) and len(batch)<HISTORY_BATCH:
-            if ledger.read()['paused'] or not session_window(datetime.now(ZoneInfo('America/New_York'))):break
-            if time.monotonic()>=deadline:break
+            if ledger.read()['paused'] or not session_window(self.now('America/New_York')):break
+            if self.monotonic()>=deadline:break
             if budget.used()>=500:
                 notes.append('Normal API budget exhausted; history batches paused, priority holdings checks retained.');break
             symbol=universe[cursor%len(universe)];cursor=(cursor+1)%len(universe);visited+=1
@@ -153,6 +166,13 @@ class RankedScanner(Scanner):
             try:
                 rows=self._history(symbol,mapping,today)
                 assess(rows);bars[symbol]=rows;self.daily['errors'].pop(symbol,None)
+                # A new session requires fresh bars. Only identical grids verified
+                # by today's first successful response can reuse previous bars.
+                if 'verified_grid' not in self.daily:
+                    grid=[r['datetime'][:10] for r in rows];self.daily['verified_grid']=grid
+                    for cached,old in self.daily.pop('previous_bars',{}).items():
+                        if cached not in held and cached in universe and cached not in bars and [r['datetime'][:10] for r in old]==grid:
+                            bars[cached]=old
             except MarketUnavailable as exc:
                 # Keep this symbol pending and stop the batch, rather than poisoning
                 # every stock's daily history cache with an account/network failure.
@@ -227,6 +247,9 @@ class Journal:
                     scan_notes=status.get('skipped',[]))
                 db.execute('INSERT INTO decisions VALUES (?,?,?,?,?,?)',
                     (scan+':'+symbol,stamp,day,symbol,json.dumps(body,allow_nan=False),'{}'))
+            cutoff=(date.fromisoformat(day)-timedelta(days=90)).isoformat()
+            db.execute('DELETE FROM decisions WHERE day<?',(cutoff,))
+            db.execute('DELETE FROM decisions WHERE rowid IN (SELECT rowid FROM decisions ORDER BY at DESC,rowid DESC LIMIT -1 OFFSET 250000)')
 
     def state(self,limit=200):
         with closing(sqlite3.connect(self.path,timeout=10)) as db:
@@ -234,4 +257,4 @@ class Journal:
             rows=[json.loads(body)|{'outcomes':json.loads(out)} for body,out in db.execute(
                 'SELECT body,outcomes FROM decisions ORDER BY at DESC,rowid DESC LIMIT ?',(limit,))]
         return dict(total=total,limit=limit,records=rows,
-            note='Outcomes are cost-free USD moves from the prior completed close to the 1st, 5th and 20th session closes AFTER the observation date. They are not trade returns. References are rebased using the same split-adjusted history. Blank means pending or insufficient subsequently received history. Intraday observations overlap and are not independent samples.')
+            note='Retention: latest 90 days, capped at 250,000 observations. Export regularly to keep older records. Outcomes are cost-free USD moves from the prior completed close to the 1st, 5th and 20th session closes AFTER the observation date. They are not trade returns. References are rebased using the same split-adjusted history. Blank means pending or insufficient subsequently received history. Intraday observations overlap and are not independent samples.')

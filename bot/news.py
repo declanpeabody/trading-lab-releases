@@ -203,6 +203,7 @@ class News:
                 with self.lock, self.db:
                     self.info['coverage']=coverage
                     self.info['requested_symbols']=selected
+                    self.db.execute('DELETE FROM events WHERE rowid NOT IN (SELECT rowid FROM events ORDER BY rowid DESC LIMIT 10000)')
                     self.db.execute('INSERT OR REPLACE INTO meta VALUES (1,?)',(json.dumps(self.info),))
         finally:
             self.busy=False

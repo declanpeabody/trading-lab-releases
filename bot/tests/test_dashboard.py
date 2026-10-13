@@ -47,6 +47,14 @@ class DashboardTests(unittest.TestCase):
         self.assertTrue(state['paused'])
         self.assertNotIn('API_KEY',json.dumps(state))
 
+    def test_disk_failure_returns_visible_status_and_worker_health(self):
+        with patch.object(self.ledger,'read',side_effect=OSError('disk failure')):
+            with self.assertRaises(HTTPError) as error:self.get('/api/state')
+            self.assertEqual(error.exception.code,503)
+            result=json.loads(error.exception.read())
+            self.assertEqual(result['error'],'Account storage unavailable')
+            self.assertIn('worker',result)
+
     def test_control_requires_csrf_and_persists(self):
         with self.get('/api/state') as response: token=json.load(response)['csrf']
         headers={'Authorization':self.auth,'Content-Type':'application/json'}

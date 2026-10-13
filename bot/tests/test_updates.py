@@ -31,6 +31,15 @@ class SignedUpdates(unittest.TestCase):
     def test_verified_release(self):
         m=updater.verify(self.stage,self.public);target=updater.unpack(self.stage,m)
         self.assertEqual((target/'app.py').read_bytes(),b'test contents')
+    def test_no_update_checks_discard_temporary_stages(self):
+        self.manifest['version']=updater.VERSION;self.sign()
+        u=updater.Updates(self.root/'bot');u.configure('owner/repo',self.public.read_text())
+        def download(url,limit):return (self.stage/url.rsplit('/',1)[-1]).read_bytes()
+        with patch.object(updater,'download',side_effect=download):
+            for _ in range(4):u._check()
+        self.assertFalse(u.state()['available'])
+        self.assertFalse(any(p.is_dir() for p in u.root.iterdir()))
+
     def test_tampered_manifest(self):
         (self.stage/'manifest.json').write_text('{}')
         with self.assertRaisesRegex(ValueError,'signature'):updater.verify(self.stage,self.public)

@@ -130,14 +130,8 @@ def main():
         print('Username:',c['DASHBOARD_USER'],'\nPassword:',c['DASHBOARD_PASSWORD'])
         print('Keep this private; do not send a screenshot of it.')
     elif action=='8':
-        stop()
-        try:
-            backup=apply_update(BASE,SOURCE)
-        except Exception:
-            print('Update failed; existing files were preserved or restored. Trying to restart the previous service.')
-            start()
-            raise
-        start()
+        from update_worker import manual_update
+        backup=manual_update(BASE,SOURCE)
         print('Updated. Settings and paper history preserved. Backup:',backup)
         subprocess.run(['/usr/bin/open',URL+'/research'],check=False)
     else: print('No changes made.')

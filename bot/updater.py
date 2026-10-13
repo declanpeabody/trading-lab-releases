@@ -15,7 +15,7 @@ from urllib.request import Request, HTTPRedirectHandler, build_opener
 import uuid
 import zipfile
 from version import VERSION
-from mac_update import FILES
+from mac_update import FILES, require_space, cleanup_updates
 
 def version_tuple(value):
     if not re.fullmatch(r'\d{4}\.\d{1,2}\.\d{1,2}\.\d{1,6}',value):raise ValueError('Invalid release version')
@@ -126,7 +126,10 @@ class Updates:
         threading.Thread(target=self._check,daemon=True).start()
 
     def _check(self):
+        stage=None
         try:
+            cleanup_updates(self.base,protected=(self.state().get("stage"),))
+            require_space(self.base,extra=30_000_000)
             repo=json.loads(self.config.read_text())['repo'];root=f'https://github.com/{repo}/releases/latest/download/'
             stage=self.root/uuid.uuid4().hex;stage.mkdir(mode=0o700)
             for name in ('manifest.json','manifest.sig'):(stage/name).write_bytes(download(root+name,100000))
@@ -143,7 +146,13 @@ class Updates:
                 'version':manifest['version'],'notes':manifest['notes'],'stage':stage.name,'checked_at':time.time()})
         except Exception as exc:
             save(self.status_path,{'available':False,'message':str(exc) if isinstance(exc,ValueError) else 'Release check failed; installed bot unchanged.'})
-        finally:self.busy=False
+        finally:
+            try:
+                if stage and stage.name!=read_json(self.status_path,{}).get('stage'):
+                    __import__('shutil').rmtree(stage)
+                cleanup_updates(self.base,protected=(read_json(self.status_path,{}).get('stage'),))
+            except OSError:pass
+            self.busy=False
 
     def install(self,version,automatic=False):
         import sys
@@ -152,6 +161,7 @@ class Updates:
             if self.busy:raise ValueError('An update operation is already running')
             state=self.state()
             if state.get('installing'):raise ValueError('Installation is already in progress')
+            if (self.base/'data'/'update_hold').exists():raise ValueError('Resolve the previous installation before another update')
             if automatic:
                 if not state['automatic'] or not automatic_window():raise ValueError('Automatic installation is not currently permitted')
                 if state.get('automatic_attempted_version')==version:raise ValueError('This release already had an installation attempt; review it manually')
@@ -161,6 +171,7 @@ class Updates:
             if stage.parent!=self.root.resolve():raise ValueError('Invalid staged release location')
             manifest=verify(stage,self.key)
             if manifest['version']!=version:raise ValueError('Staged release changed; check again')
+            require_space(self.base)
             unpack(stage,manifest)
             config=json.loads((self.base/'config.json').read_text())
             # Independent launchd job survives stopping the trading service.

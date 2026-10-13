@@ -7,6 +7,7 @@ import os
 import secrets
 import sys
 import threading
+import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -21,21 +22,38 @@ from version import VERSION
 
 ROOT = Path(__file__).parent
 STOP = threading.Event()
+WORKER = {'state':'starting','message':'Worker starting','heartbeat':time.time(),'due':time.time()+900}
+
+
+def worker_health(thread):
+    info=dict(WORKER);alive=thread.is_alive()
+    overdue=time.time()>info['due']+900
+    return info|{'alive':alive,'healthy':alive and not overdue and info['state']!='failed',
+        'message':('Trading worker stopped; restart the service.' if not alive else
+                   'Trading worker overdue; check the Mac service.' if overdue else info['message'])}
 
 
 def worker(ledger):
-    scanner = RankedScanner(os.getenv('DATA_DIR', '/data'))
+    global WORKER
+    scanner=None
     while not STOP.is_set():
-        if not (Path(os.getenv('DATA_DIR','/data'))/'update_hold').exists() and not ledger.read()['paused'] and session_window(datetime.now(ZoneInfo('America/New_York'))):
-            try:
-                scanner.cycle(ledger)
-            except ValueError as exc:
-                ledger.fail(str(exc))
-            except Exception:
-                ledger.fail('Unexpected data or processing error; no new decisions until the next valid check.')
-            finally:
+        delay=900
+        WORKER={'state':'checking','message':'Checking worker and account','heartbeat':time.time(),'due':time.time()}
+        try:
+            if scanner is None:scanner=RankedScanner(os.getenv('DATA_DIR','/data'))
+            if not (Path(os.getenv('DATA_DIR','/data'))/'update_hold').exists() and not ledger.read()['paused'] and session_window(datetime.now(ZoneInfo('America/New_York'))):
+                try:scanner.cycle(ledger)
+                except ValueError as exc:ledger.fail(str(exc))
                 scanner.record_status(ledger)
-        STOP.wait(900)
+            WORKER={'state':'waiting','message':'Worker active; waiting for the next scheduled check','heartbeat':time.time(),'due':time.time()+delay}
+        except Exception:
+            # Disk/database/init/status errors must not escape and silently kill this thread.
+            delay=60;scanner=None
+            message='Worker processing or storage failure. Decisions stopped; retrying in one minute. Check disk space if this persists.'
+            WORKER={'state':'failed','message':message,'heartbeat':time.time(),'due':time.time()+delay}
+            try:ledger.fail(message)
+            except Exception:pass  # Health remains available in memory even when disk is full.
+        STOP.wait(delay)
 
 
 def top_navigation(path,nonce):
@@ -75,11 +93,15 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
 
         def do_GET(self):
             if self.path == '/healthz':
-                self.respond(200 if thread.is_alive() else 503, json.dumps({'running':thread.is_alive(),'version':VERSION}))
+                healthy=worker_health(thread)['healthy']
+                self.respond(200 if healthy else 503, json.dumps({'running':healthy,'version':VERSION}))
                 return
             if not self.authorized(): return
             if self.path == '/api/state':
-                state = ledger.read()
+                try:state = ledger.read()
+                except Exception:
+                    self.respond(503,json.dumps({'error':'Account storage unavailable','worker':worker_health(thread)}));return
+                state['worker']=worker_health(thread)
                 state['csrf'] = csrf
                 state['data_configured'] = bool(os.getenv('TWELVE_DATA_API_KEY'))
                 self.respond(200, json.dumps(state, allow_nan=False))
@@ -124,6 +146,7 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
                 length = int(self.headers.get('Content-Length','0'))
                 if not 0 < length <= (16000 if self.path=='/api/updates' else 1024): raise ValueError()
                 payload = json.loads(self.rfile.read(length))
+                if not isinstance(payload,dict):raise ValueError('Expected an object')
                 if self.path == '/api/research' and research:
                     research.start(payload)
                 elif self.path == '/api/news' and news:
@@ -135,7 +158,9 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
                     elif payload.get('action')=='configure':updates.configure(payload['repo'],payload['public_key'])
                     else:raise ValueError('Unknown update control')
                 elif self.path == '/api/control':
-                    ledger.control(payload['action'])
+                    if payload['action']=='reconcile':
+                        ledger.reconcile(payload['symbol'],payload['id'],payload['ratio'],payload['source'])
+                    else:ledger.control(payload['action'])
                 else:
                     raise ValueError('Research unavailable')
             except (ValueError, KeyError, TypeError) as exc:

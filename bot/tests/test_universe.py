@@ -64,12 +64,12 @@ class UniverseTests(unittest.TestCase):
         self.assertTrue(held.issubset(self.scanner.status['checked']))
         self.assertFalse(any(c[0]=='time_series' and not c[2] for c in self.market.calls))
         self.assertEqual(self.scanner.status['history_batch'],[])
-    def test_daily_reset_continues_cursor_and_never_uses_previous_day_candidate_cache(self):
+    def test_day_rollover_defers_ranking_then_reuses_provider_verified_unchanged_grid(self):
         self.ledger.control('block');self.scan();cursor=self.scanner.state['screen_cursor']
         self.market.calls=[];self.scan(NOW+timedelta(days=3))
         self.assertEqual(self.scanner.status['selected'],[])
         self.assertEqual(self.scanner.status['history_batch'][0],self.scanner.status['universe_symbols'][cursor])
-        self.assertEqual(self.scanner.status['histories_ready'],20)
+        self.assertEqual(self.scanner.status['histories_ready'],40)
     def test_held_history_failure_blocks_candidates(self):
         self.scan();self.scan();held=next(iter(self.ledger.read()['positions']))
         self.scanner.daily['bars'].pop(held);self.market.bad.add(held);self.market.calls=[]

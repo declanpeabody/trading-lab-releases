@@ -1,3 +1,12 @@
+## 2026.10.13.2 regression coverage
+
+Stock split/reverse split guard, exactly-once verified reconciliation, legacy basis
+and genuine-loss confirmation; worker recovery after disk/init/status failures;
+rejected quotes; session-grid cache reuse; disk-space refusal; full manual startup
+rollback; retention and protected recovery folders; expanded scanner replay with
+future-bar perturbation, missing data, budget limits and cash reconciliation.
+Mac launchd operations are mocked in automated tests, not run on a physical iMac.
+
 # Market-data diagnostic validation — 2026.10.13.1
 
 Synthetic transport tests cover wrapped TLS/certificate, DNS, timeout, connection,
