@@ -7,7 +7,7 @@ import time
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 from engine import history, quote
-from market import session_window, ApiBudget
+from market import session_window, ApiBudget, MarketUnavailable
 from scanner import Scanner, catalogue, LEGACY
 from strategy import WATCHLIST, VERSION, rank_histories, candidates, assess, LIVE_VERSION, UNIVERSE_TARGET, HISTORY_BATCH, screening_universe
 
@@ -22,6 +22,14 @@ class RankedScanner(Scanner):
         if self.daily_path.exists():
             try:self.daily=json.loads(self.daily_path.read_text())
             except (OSError,ValueError):pass
+        # Recover the old release's connection failures without resetting quota/history.
+        retry={symbol for symbol,message in self.daily.get('errors',{}).items()
+               if message in ('Market-data connection failed; no trades made.',
+                              'Market-data request rejected; check key, quota and data entitlement.')}
+        if retry:
+            self.daily['attempted']=[s for s in self.daily.get('attempted',[]) if s not in retry]
+            for symbol in retry:self.daily['errors'].pop(symbol,None)
+            self.save_daily()
 
     def save_daily(self):
         tmp=self.daily_path.with_suffix('.tmp')
@@ -34,6 +42,7 @@ class RankedScanner(Scanner):
         try:return self._cycle(ledger)
         except Exception as exc:
             error=str(exc) if isinstance(exc,ValueError) else 'Cycle failed before completion'
+            if isinstance(exc,MarketUnavailable):self.status.setdefault('skipped',[]).append(str(exc))
             raise
         finally:
             try:
@@ -55,13 +64,16 @@ class RankedScanner(Scanner):
         held=list(ledger.read()['positions']);notes=[]
         self.status=dict(mode='Batched 300-stock target · US regular hours',version=LIVE_VERSION,
             target_count=UNIVERSE_TARGET,universe_count=0,selected=[],checked=[],skipped=notes,ranking=[])
+        cached=screening_universe(self.state['universe'])
+        self.status.update(universe_count=len(cached),universe_symbols=cached)
         if time.time()-self.state['fetched']>7*86400:
             try:
                 universe=catalogue(self.market.get('stocks',country='United States',type='Common Stock')['data'])
                 if not universe:raise ValueError('Empty catalogue')
                 self.state.setdefault('known',{}).update(universe)
                 self.state.update(universe=universe,fetched=time.time());self.save()
-            except (ValueError,KeyError,TypeError):notes.append('Catalogue unavailable; using cached mappings.')
+            except MarketUnavailable:raise
+            except (ValueError,KeyError,TypeError) as exc:notes.append(f'Catalogue unavailable; using cached mappings. {exc}')
         mapping=LEGACY|self.state.get('known',{})|self.state['universe']
         universe=screening_universe(self.state['universe'])
         self.status.update(universe_count=len(universe),universe_symbols=universe,catalogue_at=self.state['fetched'])
@@ -69,10 +81,13 @@ class RankedScanner(Scanner):
         if self.daily.get('day')!=today or self.daily.get('version')!=LIVE_VERSION:
             self.daily={'day':today,'version':LIVE_VERSION,'bars':{},'attempted':[],'errors':{}}
         bars=self.daily['bars'];attempted=set(self.daily['attempted'])
+        self.status.update(histories_ready=sum(s in bars for s in universe),
+            history_failures=dict(self.daily['errors']),histories_pending=sum(s not in bars and s not in attempted for s in universe))
         # Holdings need complete price histories for exits, but never need volume eligibility.
         for symbol in held:
             if symbol not in bars:
                 try:bars[symbol]=self._history(symbol,mapping,today,True)
+                except MarketUnavailable:raise
                 except (ValueError,TypeError,KeyError):raise ValueError(f'Held stock {symbol}: history unavailable; decisions blocked this cycle.') from None
         self.save_daily()
         # Ranking uses ONLY valid bars fetched today and a common completed session grid.
@@ -99,6 +114,7 @@ class RankedScanner(Scanner):
                 q=self.market.get('quote',priority=symbol in held,symbol=symbol,exchange=mapping[symbol],prepost='false')
                 if q.get('exchange')!=mapping[symbol]:raise ValueError('Quote exchange mismatch')
                 raw[symbol]=q
+            except MarketUnavailable:raise
             except (ValueError,KeyError,TypeError) as exc:
                 if symbol in held:raise ValueError(f'Held stock {symbol}: quote unavailable; decisions blocked this cycle.') from None
                 notes.append(f'{symbol}: {exc}')
@@ -125,7 +141,7 @@ class RankedScanner(Scanner):
         # Decisions finish first. New histories only enter the NEXT scan's ranking.
         # Preserve the cursor across days/restarts so quota limits cannot starve the tail.
         cursor=self.state.get('screen_cursor',0);visited=0;batch=[];deadline=time.monotonic()+180
-        budget=ApiBudget(self.directory)
+        budget=ApiBudget(self.directory);shared_failure=None
         while universe and visited<len(universe) and len(batch)<HISTORY_BATCH:
             if ledger.read()['paused'] or not session_window(datetime.now(ZoneInfo('America/New_York'))):break
             if time.monotonic()>=deadline:break
@@ -137,6 +153,12 @@ class RankedScanner(Scanner):
             try:
                 rows=self._history(symbol,mapping,today)
                 assess(rows);bars[symbol]=rows;self.daily['errors'].pop(symbol,None)
+            except MarketUnavailable as exc:
+                # Keep this symbol pending and stop the batch, rather than poisoning
+                # every stock's daily history cache with an account/network failure.
+                attempted.discard(symbol);cursor-=1;shared_failure=exc
+                notes.append('History batch stopped after a shared data failure. Pending stocks will retry at a later scheduled check.')
+                break
             except (ValueError,TypeError,KeyError) as exc:
                 self.daily['errors'][symbol]=str(exc)
                 if 'Local daily API budget' in str(exc):break
@@ -145,6 +167,7 @@ class RankedScanner(Scanner):
         count=sum(s in bars for s in universe)
         self.status.update(histories_ready=count,history_batch=batch,attempts_today=len(attempted),
             history_failures=dict(self.daily['errors']),histories_pending=sum(s not in bars and s not in attempted for s in universe))
+        if shared_failure:raise shared_failure
         if self.daily['errors']:notes.append(f'{len(self.daily["errors"])} histories unavailable today; those stocks are skipped until next day.')
 
 

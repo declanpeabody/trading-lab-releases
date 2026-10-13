@@ -1,3 +1,20 @@
+# Market-data diagnostic validation — 2026.10.13.1
+
+Synthetic transport tests cover wrapped TLS/certificate, DNS, timeout, connection,
+HTTP 401/403/429/503, JSON API errors and malformed responses. Secret-bearing
+exception/body fixtures verify that diagnostics do not disclose raw details.
+Shared cooldown is checked across separate Market instances, including no extra
+request/credit during the pause and successful recovery after expiry.
+
+Scanner tests check first-failure stopping for catalogue, candidate quotes and
+history batches; same-day recovery across scanner restart; old-cache migration
+without resetting quota or deleting valid bars; partial progress persistence and
+retaining actual buys in the journal when a later history request fails.
+Full regression tests gate publication. No live user key or Mac connection was
+accessed, so the cause of the reported connection failure remains unconfirmed.
+
+---
+
 # Dashboard validation — 2026.10.12.3
 
 JavaScript syntax and Python compilation checked. DOM interaction checks cover

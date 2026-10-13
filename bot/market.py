@@ -4,6 +4,9 @@ import os
 import time
 import threading
 import sqlite3
+import socket
+import ssl
+from urllib.error import HTTPError, URLError
 from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -42,34 +45,78 @@ class ApiBudget:
             return row[0] if row else 0
 
 
+class MarketUnavailable(ValueError):
+    """A shared transport/account failure, not an individual stock rejection."""
+
+
+def response_error(code):
+    # Never display response bodies, request URLs, exception text or credentials.
+    try:code=int(code)
+    except (TypeError,ValueError):code=0
+    if code==401:return MarketUnavailable('Market data: authentication rejected (401). Re-enter the Twelve Data key in Mac setup.')
+    if code==403:return MarketUnavailable('Market data: access denied (403). Check the key and endpoint/data entitlement in Twelve Data.')
+    if code==429:return MarketUnavailable('Market data: provider rate or credit limit reached (429). Wait for the provider allowance to recover.')
+    if code in (400,404,422):return ValueError(f'Market data: request rejected ({code}); check the stock, exchange and endpoint parameters.')
+    if 500<=code<=599:return MarketUnavailable(f'Market data: provider service error ({code}). Retry at the next scheduled check.')
+    if 100<=code<=599:return MarketUnavailable(f'Market data: unexpected HTTP/API status ({code}). Check the provider service.')
+    return MarketUnavailable('Market data: provider returned an error without a recognised status code.')
+
+
+def connection_error(exc):
+    reason=exc.reason if isinstance(exc,URLError) else exc
+    if isinstance(reason,ssl.SSLCertVerificationError):
+        return MarketUnavailable('Market data: TLS certificate verification failed. Repair the certificates for the Python installation used by the bot; do not disable verification.')
+    if isinstance(reason,ssl.SSLError):return MarketUnavailable('Market data: secure TLS connection failed. Check the Mac clock and network security settings.')
+    if isinstance(reason,socket.gaierror):return MarketUnavailable('Market data: DNS lookup failed for api.twelvedata.com. Check the Mac internet/DNS connection.')
+    if isinstance(reason,TimeoutError):return MarketUnavailable('Market data: connection timed out. Check the Mac internet connection and provider availability.')
+    return MarketUnavailable('Market data: network connection failed. Check internet access, firewall, VPN or proxy settings on the Mac.')
+
+
 class Market:
     request_lock = threading.Lock()
     last_global_request = 0.0
+    blocked_until = 0.0
+    blocked_message = ""
     def __init__(self):
         self.cache = {}
         self.last_request = 0
 
     def get(self, endpoint, *, priority=False, **params):
-        key = os.environ.get('TWELVE_DATA_API_KEY', '')
+        key = os.environ.get('TWELVE_DATA_API_KEY', '').strip()
         if not key:
-            raise ValueError('Setup needed: add the market-data API key using the Mac setup tool.')
-        # Stay below eight calls/minute. No automatic retries and no URL logging.
+            raise MarketUnavailable('Setup needed: add the market-data API key using the Mac setup tool.')
+        if endpoint not in ('quote', 'time_series', 'stocks'):
+            raise ValueError('Endpoint has no configured API credit weight')
+        # Share spacing and outage protection with research; never retry inside a request.
         with Market.request_lock:
-            if endpoint not in ('quote', 'time_series', 'stocks'):
-                raise ValueError('Endpoint has no configured API credit weight')
+            if time.monotonic()<Market.blocked_until:
+                raise MarketUnavailable(Market.blocked_message+' Requests paused for up to 15 minutes after the failure; no additional API credit used.')
             ApiBudget(os.getenv('DATA_DIR', '/data')).reserve(priority)
             time.sleep(max(0, 8 - (time.monotonic() - Market.last_global_request)))
             Market.last_global_request = time.monotonic()
-        url = 'https://api.twelvedata.com/' + endpoint + '?' + urlencode(params)
-        request = Request(url, headers={'Authorization': 'apikey ' + key, 'Accept': 'application/json'})
-        try:
-            with urlopen(request, timeout=20) as response:
-                data = json.load(response)
-        except Exception:
-            raise ValueError('Market-data connection failed; no trades made.') from None
-        if data.get('status') == 'error':
-            raise ValueError('Market-data request rejected; check key, quota and data entitlement.')
-        return data
+            url = 'https://api.twelvedata.com/' + endpoint + '?' + urlencode(params)
+            request = Request(url, headers={'Authorization': 'apikey ' + key, 'Accept': 'application/json'})
+            failure=None
+            try:
+                with urlopen(request, timeout=20) as response:
+                    data = json.load(response)
+                if not isinstance(data,dict):
+                    failure=MarketUnavailable('Market data: unexpected response format; expected a JSON object.')
+                elif data.get('status')=='error':failure=response_error(data.get('code'))
+            except HTTPError as exc:
+                failure=response_error(exc.code)
+                exc.close()
+            except (URLError,OSError) as exc:
+                failure=connection_error(exc)
+            except (ValueError,UnicodeError):
+                failure=MarketUnavailable('Market data: response was not valid JSON. Check provider availability or a network proxy.')
+            if failure:
+                if isinstance(failure,MarketUnavailable):
+                    Market.blocked_until=time.monotonic()+900
+                    Market.blocked_message=str(failure)
+                raise failure from None
+            Market.blocked_until=0;Market.blocked_message=''
+            return data
 
     def snapshot(self):
         now = datetime.now(ZoneInfo('America/New_York'))

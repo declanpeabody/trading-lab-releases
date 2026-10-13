@@ -1,3 +1,21 @@
+# Market-data recovery — version 2026.10.13.1
+
+Install through Software Updates or automatic updates. At the next scheduled
+regular-hours scan, connection failures now show a specific, safe category in bot
+status and Scanner notes. Send that message for diagnosis; do not send API keys.
+A shared outage stops the batch and pauses provider requests for up to 15 minutes
+while the process remains running. Held-position checks also cannot obtain fresh
+data during this pause. The next scheduled request after it expires probes again.
+Individual symbol/request errors continue to skip just that stock.
+
+The upgrade removes old generic connection-failure cache markers, allowing
+same-day recovery without resetting the request budget or paper account. It does
+not disable TLS checks or claim to fix the still-unknown underlying connection
+failure on your Mac. If your normal request budget is already exhausted, it still
+must reset before screening can resume.
+
+---
+
 # Dashboard tabs and market display — version 2026.10.12.3
 
 Install from Software Updates, or let automatic mode install during its next

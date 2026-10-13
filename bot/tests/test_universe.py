@@ -90,3 +90,72 @@ class UniverseTests(unittest.TestCase):
         self.scan();state=self.scanner.journal.state(limit=300)
         self.assertEqual(sum(r['action']=='BUY' for r in state['records']),5)
         self.assertTrue(all(r['strategy_version']==LIVE_VERSION for r in state['records']))
+    def test_shared_history_failure_stops_batch_and_can_recover_same_day(self):
+        from market import MarketUnavailable
+        original=self.market.get
+        def broken(endpoint,**params):
+            if endpoint=='time_series':raise MarketUnavailable('Market data: TLS certificate verification failed.')
+            return original(endpoint,**params)
+        with patch.object(self.market,'get',side_effect=broken) as get:
+            with self.assertRaisesRegex(MarketUnavailable,'TLS'):self.scan()
+            self.assertEqual(sum(c.args[0]=='time_series' for c in get.call_args_list),1)
+        self.assertEqual(self.scanner.status['histories_pending'],300)
+        self.assertEqual(self.scanner.daily['attempted'],[])
+        self.assertEqual(self.scanner.daily['errors'],{})
+        self.assertEqual(self.scanner.state['screen_cursor'],0)
+        records=self.scanner.journal.state(300)['records']
+        self.assertTrue(all(r['action']=='NOT_EVALUATED' and 'TLS' in r['reason'] for r in records))
+        self.scanner=RankedScanner(self.root,self.market);self.scan()
+        self.assertEqual(self.scanner.status['histories_ready'],20)
+    def test_shared_candidate_failure_stops_before_decisions_and_history_batch(self):
+        from market import MarketUnavailable
+        self.scan();self.market.calls=[];original=self.market.get
+        def broken(endpoint,**params):
+            if endpoint=='quote':raise MarketUnavailable('Market data: authentication rejected (401).')
+            return original(endpoint,**params)
+        with patch.object(self.market,'get',side_effect=broken) as get:
+            with self.assertRaisesRegex(MarketUnavailable,'401'):self.scan()
+            self.assertEqual(get.call_count,1)
+        self.assertEqual(self.ledger.read()['positions'],{})
+    def test_shared_catalogue_failure_is_not_silently_swallowed(self):
+        from market import MarketUnavailable
+        with patch.object(self.market,'get',side_effect=MarketUnavailable('Market data: DNS lookup failed.')) as get:
+            with self.assertRaisesRegex(MarketUnavailable,'DNS'):self.scan()
+            self.assertEqual(get.call_count,1)
+        self.assertTrue(any('DNS' in n for n in self.scanner.status['skipped']))
+    def test_old_connection_failures_released_without_resetting_budget_or_valid_bars(self):
+        import json
+        self.scan();valid=dict(self.scanner.daily['bars'])
+        self.scanner.daily['attempted']+=['FAKE1','FAKE2']
+        self.scanner.daily['errors']={'FAKE1':'Market-data connection failed; no trades made.','FAKE2':'Daily history is stale'}
+        self.scanner.save_daily();ApiBudget(self.root).reserve()
+        restored=RankedScanner(self.root,self.market)
+        self.assertNotIn('FAKE1',restored.daily['attempted']);self.assertNotIn('FAKE1',restored.daily['errors'])
+        self.assertIn('FAKE2',restored.daily['attempted']);self.assertEqual(restored.daily['bars'],valid)
+        self.assertEqual(ApiBudget(self.root).used(),1)
+    def test_completed_histories_saved_when_later_request_fails(self):
+        from market import MarketUnavailable
+        original=self.market.get;count=0
+        def broken(endpoint,**params):
+            nonlocal count
+            if endpoint=='time_series':
+                count+=1
+                if count==3:raise MarketUnavailable('Market data: connection timed out.')
+            return original(endpoint,**params)
+        with patch.object(self.market,'get',side_effect=broken):
+            with self.assertRaises(MarketUnavailable):self.scan()
+        restored=RankedScanner(self.root,self.market)
+        self.assertEqual(len(restored.daily['bars']),2)
+        self.assertEqual(len(restored.daily['attempted']),2)
+        self.assertEqual(restored.state['screen_cursor'],2)
+    def test_history_outage_does_not_erase_already_recorded_buys(self):
+        from market import MarketUnavailable
+        self.scan();original=self.market.get
+        def broken(endpoint,**params):
+            if endpoint=='time_series':raise MarketUnavailable('Market data: DNS lookup failed.')
+            return original(endpoint,**params)
+        with patch.object(self.market,'get',side_effect=broken):
+            with self.assertRaises(MarketUnavailable):self.scan()
+        self.assertEqual(len(self.ledger.read()['positions']),5)
+        records=self.scanner.journal.state(300)['records']
+        self.assertEqual(sum(r['action']=='BUY' for r in records),5)
