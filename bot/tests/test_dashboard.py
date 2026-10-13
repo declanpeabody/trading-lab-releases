@@ -77,6 +77,24 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(json.load(r)['active'],200)
         self.assertTrue(self.ledger.read()['paused'])
 
+    def test_connection_test_is_authenticated_csrf_protected_and_separate(self):
+        before=self.ledger.read()
+        with patch('app.ConnectionTest.start') as start:
+            with self.get('/api/state') as r:state=json.load(r)
+            self.assertIn('request_budget',state);self.assertIn('no_trade',state)
+            start.assert_not_called()
+            headers={'Content-Type':'application/json'}
+            req=lambda:Request(self.base+'/api/connection-test',data=b'{}',headers=headers)
+            with self.assertRaises(HTTPError) as error:urlopen(req(),timeout=2)
+            self.assertEqual(error.exception.code,401)
+            headers['Authorization']=self.auth
+            with self.assertRaises(HTTPError) as error:urlopen(req(),timeout=2)
+            self.assertEqual(error.exception.code,403);start.assert_not_called()
+            headers['X-CSRF-Token']=state['csrf']
+            with urlopen(req(),timeout=2) as r:self.assertEqual(r.status,200)
+            start.assert_called_once()
+        self.assertEqual(self.ledger.read(),before)
+
     def test_control_requires_csrf_and_persists(self):
         with self.get('/api/state') as response: token=json.load(response)['csrf']
         headers={'Authorization':self.auth,'Content-Type':'application/json'}

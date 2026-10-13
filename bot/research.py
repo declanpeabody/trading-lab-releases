@@ -9,7 +9,7 @@ import threading
 from ranked_backtest import dates, parse_series, run, walk_forward, run_batched
 from strategy import WATCHLIST, screening_universe
 from scanner import catalogue
-from market import Market, MarketUnavailable
+from market import Market, MarketUnavailable, BudgetDeferred
 from mac_update import prune_files
 
 class Research:
@@ -42,7 +42,7 @@ class Research:
         try:
             a,b=dates(start,end);warm=(a-timedelta(days=150)).isoformat()
             data={};provenance={};market=Market()
-            mapping=catalogue(market.get('stocks',country='United States',type='Common Stock')['data'])
+            mapping=catalogue(market.get('stocks',purpose='research',country='United States',type='Common Stock')['data'])
             if mode!='scanner_replay' and not all(s in mapping for s in WATCHLIST):raise ValueError('Watchlist exchange mappings incomplete; no test run.')
             symbols=screening_universe(mapping) if mode=='scanner_replay' else WATCHLIST
             unavailable={}
@@ -54,7 +54,7 @@ class Research:
                         bundle=json.loads(cache.read_text())
                     else:
                         extra={'exchange':mapping[symbol]} if symbol in mapping else {}
-                        raw=market.get('time_series',symbol=symbol,**extra,interval='1day',start_date=warm,
+                        raw=market.get('time_series',purpose='research',symbol=symbol,**extra,interval='1day',start_date=warm,
                             end_date=end,outputsize=5000,adjust='splits',order='asc')
                         parse_series(raw,symbol)
                         if symbol in mapping and raw.get('meta',{}).get('exchange')!=mapping[symbol]:raise ValueError('Historical exchange mismatch')
@@ -63,7 +63,7 @@ class Research:
                     data[symbol]=parse_series(bundle['raw'],symbol)
                     provenance[symbol]={'retrieved_at':bundle['retrieved_at'],
                         'sha256':hashlib.sha256(json.dumps(bundle['raw'],sort_keys=True).encode()).hexdigest()}
-                except MarketUnavailable:raise
+                except (MarketUnavailable,BudgetDeferred):raise
                 except (ValueError,KeyError,TypeError) as exc:
                     if mode!='scanner_replay' or symbol=='USD/GBP' or 'Local daily API budget' in str(exc):raise
                     data[symbol]={};unavailable[symbol]=str(exc)[:200]

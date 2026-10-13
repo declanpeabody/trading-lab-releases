@@ -7,7 +7,7 @@ import time
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 from engine import history, quote
-from market import session_window, ApiBudget, MarketUnavailable
+from market import session_window, ApiBudget, MarketUnavailable, BudgetDeferred
 from scanner import Scanner, catalogue, LEGACY
 from strategy import WATCHLIST, VERSION, rank_histories, candidates, assess, LIVE_VERSION, UNIVERSE_TARGET, HISTORY_BATCH, screening_universe
 
@@ -58,6 +58,8 @@ class RankedScanner(Scanner):
             if isinstance(exc,MarketUnavailable):self.status.setdefault('skipped',[]).append(str(exc))
             raise
         finally:
+            self.status['decisions']=self.audit.get('decisions',[])
+            self.status['decision_at']=self.audit.get('at',self.now('UTC').isoformat())
             try:
                 self.journal.record(self.audit.get('at',self.now('UTC').isoformat()),
                     self.now('America/New_York').date().isoformat(),self.audit,self.status,error)
@@ -66,7 +68,7 @@ class RankedScanner(Scanner):
 
     def _history(self,symbol,mapping,today,priority=False):
         if symbol not in mapping:raise ValueError('Exchange identity unavailable')
-        raw=self.market.get('time_series',priority=priority,symbol=symbol,exchange=mapping[symbol],
+        raw=self.market.get('time_series',priority=priority,purpose='trading' if priority else 'history',symbol=symbol,exchange=mapping[symbol],
             interval='1day',outputsize=60,adjust='splits',order='asc')
         if raw.get('meta',{}).get('exchange')!=mapping[symbol]:raise ValueError('Exchange mismatch')
         history(raw,symbol,today)
@@ -211,6 +213,9 @@ class RankedScanner(Scanner):
                     for cached,old in self.daily.pop('previous_bars',{}).items():
                         if cached not in held and cached in universe and cached not in bars and [r['datetime'][:10] for r in old]==grid:
                             bars[cached]=old
+            except BudgetDeferred as exc:
+                attempted.discard(symbol);cursor-=1;batch.pop()
+                notes.append(str(exc));break
             except MarketUnavailable as exc:
                 # Keep this symbol pending and stop the batch, rather than poisoning
                 # every stock's daily history cache with an account/network failure.

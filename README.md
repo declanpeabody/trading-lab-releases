@@ -138,3 +138,9 @@ Index quotes can be restricted or delayed. The optional ETF view shows fund shar
 prices rather than index levels; CNBC links are supplied for the exact indices.
 See TradingView's widget data policy:
 https://www.tradingview.com/widget-docs/faq/data/
+
+### Connection tests and request scheduling
+
+In Overview, use **Test data connection** for a timestamped, read-only AAPL daily-history test. It works outside trading hours, consumes at most one normal request, respects the outage cooldown, and does not clear the last account error. **Why no trade?** separates current controls from dated scan results and shows per-stock decisions.
+
+History preparation reserves seven normal requests per remaining 15-minute weekday trading slot. Research downloads run outside that window only, with a 50-attempt UTC daily sub-limit within the shared 500 normal/700 total budget. If deferred, run research again later; its successful downloads are retained. The dashboard shows the local reset and remaining allowance; this is not the provider balance.

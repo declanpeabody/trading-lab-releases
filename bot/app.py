@@ -5,6 +5,7 @@ import hmac
 import json
 import os
 import secrets
+import sqlite3
 import sys
 import threading
 import time
@@ -13,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from engine import Ledger
-from market import Market, session_window, validate_key, MarketUnavailable
+from market import Market, session_window, validate_key, MarketUnavailable, ApiBudget, ConnectionTest
 from research import Research, Experiments
 from ranked_scanner import RankedScanner, Journal
 from news import News
@@ -66,7 +67,29 @@ def top_navigation(path,nonce):
         '<a href="'+href+'"'+(' aria-current="page"' if href==path else '')+'>'+label.replace('&','&amp;')+'</a>' for href,label in links)+'</nav>'
 
 
+def no_trade_reasons(state):
+    reasons=[];scan=state.get('scanner',{})
+    if not state.get('worker',{}).get('healthy',True):reasons.append('Worker needs attention: '+state['worker']['message'])
+    if state.get('paused'):reasons.append('Paper trading is paused.')
+    if not session_window(datetime.now(ZoneInfo('America/New_York'))):reasons.append('Outside the weekday 09:30–16:00 New York trading window. Provider market-open checks also apply.')
+    if not state.get('data_configured'):reasons.append('Market-data key is missing.')
+    if state.get('error'):reasons.append('Last account/data error: '+state['error'])
+    for key,message in [('buy_block','New buys are blocked by your control.'),('risk_latched','Total drawdown buying lock is active.'),('day_block','Daily drawdown buying block is recorded; it is reassessed on the next successful session check.')]:
+        if state.get(key):reasons.append(message)
+    if any(p.get('reconciliation') for p in state.get('positions',{}).values()):reasons.append('Corporate-action verification is required before account decisions resume.')
+    if len(state.get('positions',{}))>=5:reasons.append('All five position slots are occupied.')
+    if state.get('cash',0)<=0:reasons.append('No cash is available for new purchases.')
+    if not scan:reasons.append('No scanner result has been recorded yet.')
+    elif not scan.get('ranked_histories'):reasons.append('Latest decision check had no rankable histories. Prepared histories enter the next check.')
+    elif not scan.get('selected'):reasons.append('Latest check selected no new-entry candidates from the available histories.')
+    elif not set(scan.get('selected',[])).intersection(scan.get('checked',[])):reasons.append('Latest check had no valid fresh candidate quotes.')
+    if scan and scan.get('ranked_histories',0)<scan.get('universe_count',0):reasons.append('Ranking coverage is partial: only ready stocks can enter; missing coverage alone does not block all entries.')
+    if not reasons:reasons.append('No global block identified. See the latest per-stock decisions below; an open market does not guarantee a buy signal.')
+    return {'reasons':reasons,'at':scan.get('decision_at',scan.get('updated_at')),'decisions':scan.get('decisions',[])}
+
+
 def handler_factory(ledger, username, password, thread, research=None, news=None, updates=None, journal=None, experiments=None):
+    connection_test=ConnectionTest()
     csrf = secrets.token_urlsafe(32)
     auth = 'Basic ' + base64.b64encode(f'{username}:{password}'.encode()).decode()
 
@@ -114,6 +137,10 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
                 if state['data_configured']:
                     try:validate_key(os.environ['TWELVE_DATA_API_KEY'])
                     except MarketUnavailable as exc:state['error']=str(exc)
+                state['connection_test']=connection_test.state()
+                try:state['request_budget']=ApiBudget(os.getenv('DATA_DIR','/data')).state()
+                except (OSError,sqlite3.Error):state['request_budget']={'error':'Local request counter unavailable; check storage. No allowance estimate is available.'}
+                state['no_trade']=no_trade_reasons(state)
                 self.respond(200, json.dumps(state, allow_nan=False))
             elif self.path in ('/api/experiments','/api/experiments/export') and experiments:
                 extra={'Content-Disposition':'attachment; filename="strategy-experiments.json"'} if self.path.endswith('/export') else None
@@ -149,7 +176,7 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
 
         def do_POST(self):
             if not self.authorized(): return
-            if self.path not in ('/api/control', '/api/research', '/api/news', '/api/updates', '/api/experiments'):
+            if self.path not in ('/api/control', '/api/research', '/api/news', '/api/updates', '/api/experiments', '/api/connection-test'):
                 self.respond(404, '{"error":"Not found"}')
                 return
             if not hmac.compare_digest(self.headers.get('X-CSRF-Token',''),csrf):
@@ -160,7 +187,9 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
                 if not 0 < length <= (16000 if self.path=='/api/updates' else 1024): raise ValueError()
                 payload = json.loads(self.rfile.read(length))
                 if not isinstance(payload,dict):raise ValueError('Expected an object')
-                if self.path == '/api/experiments' and experiments:
+                if self.path == '/api/connection-test':
+                    connection_test.start()
+                elif self.path == '/api/experiments' and experiments:
                     experiments.control(payload['action'],payload.get('enabled'))
                 elif self.path == '/api/research' and research:
                     research.start(payload)
@@ -179,7 +208,7 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
                 else:
                     raise ValueError('Research unavailable')
             except (ValueError, KeyError, TypeError) as exc:
-                self.respond(400, json.dumps({'error':str(exc) if self.path in ('/api/news','/api/updates') else 'Invalid control'}))
+                self.respond(400, json.dumps({'error':str(exc) if self.path in ('/api/news','/api/updates','/api/connection-test') else 'Invalid control'}))
                 return
             self.respond(200, '{"ok":true}')
 

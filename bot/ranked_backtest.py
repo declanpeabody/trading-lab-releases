@@ -169,7 +169,7 @@ def run_batched(series,mapping,start,end,slippage_bps=25,fx_fee_bps=15,normal_li
     from engine import Ledger
     from ranked_scanner import RankedScanner
     from strategy import screening_universe, LIVE_VERSION
-    from market import session_window
+    from market import session_window, ApiBudget, BudgetDeferred
     dates(start,end)
     universe=screening_universe(mapping)
     if not universe:raise ValueError('No supported stocks for scanner replay')
@@ -182,9 +182,11 @@ def run_batched(series,mapping,start,end,slippage_bps=25,fx_fee_bps=15,normal_li
         def now(self,zone):return self.current.astimezone(ZoneInfo(zone))
         def timestamp(self):return self.current.timestamp()
         def used(self):return self.count
-        def get(self,endpoint,priority=False,**params):
+        def get(self,endpoint,priority=False,purpose="trading",**params):
             if self.count>=(priority_limit if priority else normal_limit):
                 raise ValueError('Local daily API budget reached in replay')
+            if purpose=='history' and not priority and self.count>=normal_limit-ApiBudget.history_headroom(self.now('America/New_York')):
+                raise BudgetDeferred('History preparation deferred to preserve candidate credits in replay')
             self.count+=1;self.current+=timedelta(seconds=8)
             day=self.now('America/New_York').date().isoformat();symbol=params.get('symbol')
             if endpoint=='stocks':
@@ -259,7 +261,7 @@ def run_batched(series,mapping,start,end,slippage_bps=25,fx_fee_bps=15,normal_li
         start=days[0],end=days[-1],sessions=len(days),symbols=universe,initial_gbp=PAPER_CAPITAL,
         slippage_bps=slippage_bps,fx_fee_bps=fx_fee_bps,coverage=coverage,replay_errors=failures,
         replay_assumptions={'quote':'same session open at every synthetic check','fx':'prior daily close',
-            'request_seconds':8,'wait_seconds':900,'normal_limit':normal_limit,'priority_limit':priority_limit,'initial_cursor':0},
+            'request_seconds':8,'wait_seconds':900,'normal_limit':normal_limit,'priority_limit':priority_limit,'initial_cursor':0,'candidate_reserve_per_remaining_slot':7},
         comparisons={'strategy':{'metrics':metrics(curve,trades,days[0],days[-1],PAPER_CAPITAL),'curve':curve,'trades':trades},
             'cash':{'metrics':metrics(cashcurve,[],days[0],days[-1],PAPER_CAPITAL),'curve':cashcurve,'trades':[]}},
         warnings=[

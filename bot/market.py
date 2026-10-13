@@ -1,4 +1,5 @@
 """Read-only Twelve Data transport. Network errors fail closed."""
+import math
 import json
 import os
 import time
@@ -10,7 +11,7 @@ from urllib.error import HTTPError, URLError
 from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from engine import SYMBOLS, quote, history
 
@@ -25,7 +26,27 @@ class ApiBudget:
         self.path = Path(directory) / 'api_budget.sqlite3'
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-    def reserve(self, priority=False):
+    @staticmethod
+    def history_headroom(now=None):
+        now=now or datetime.now(ZoneInfo('America/New_York'))
+        if now.weekday()>=5 or now.hour*60+now.minute>=960:return 0
+        minutes=max(570,now.hour*60+now.minute)
+        return math.ceil((960-minutes)/15)*7
+
+    def state(self):
+        used=self.used();now=datetime.now(ZoneInfo('UTC'))
+        reset=(now+timedelta(days=1)).replace(hour=0,minute=0,second=0,microsecond=0)
+        headroom=self.history_headroom()
+        return dict(used=used,normal_remaining=max(0,500-used),total_remaining=max(0,700-used),
+            history_available=max(0,500-used-headroom),candidate_reserve=headroom,
+            reset_at=reset.isoformat(),research_daily_cap=50,
+            note='Local attempts only; other apps and provider credit weights are not included. History reserves seven requests per remaining 15-minute weekday slot; actual coverage is not guaranteed.')
+
+    def reserve(self, priority=False, purpose='trading'):
+        if purpose not in ('trading','history','research','diagnostic'):raise ValueError('Unknown request purpose')
+        if priority and purpose!='trading':raise ValueError('Reserved credits are for active holdings only')
+        if purpose=='research' and session_window(datetime.now(ZoneInfo('America/New_York'))):
+            raise BudgetDeferred('Research downloads deferred during US regular hours. Run again after the session; existing downloads are cached.')
         day = datetime.now(ZoneInfo('UTC')).date().isoformat()
         with sqlite3.connect(self.path) as db:
             db.execute('CREATE TABLE IF NOT EXISTS usage(day TEXT PRIMARY KEY, n INTEGER)')
@@ -34,6 +55,14 @@ class ApiBudget:
             used = row[0] if row else 0
             if used >= (700 if priority else 500):
                 raise ValueError('Local daily API budget reached; candidate scans/research stop at 500, held-position checks at 700. No subscription was changed.')
+            if purpose=='history' and used>=500-self.history_headroom():
+                raise BudgetDeferred('History preparation deferred to preserve credits for later candidate checks.')
+            if purpose=='research':
+                db.execute('CREATE TABLE IF NOT EXISTS research_usage(day TEXT PRIMARY KEY, n INTEGER)')
+                row=db.execute('SELECT n FROM research_usage WHERE day=?',(day,)).fetchone()
+                count=row[0] if row else 0
+                if count>=50:raise BudgetDeferred('Research daily allowance reached (50 requests within the shared 500); cached downloads are retained.')
+                db.execute('INSERT OR REPLACE INTO research_usage VALUES (?,?)',(day,count+1))
             db.execute('INSERT OR REPLACE INTO usage VALUES (?,?)', (day, used + 1))
 
     def used(self):
@@ -43,6 +72,10 @@ class ApiBudget:
             row = db.execute('SELECT n FROM usage WHERE day=?',
                              (datetime.now(ZoneInfo('UTC')).date().isoformat(),)).fetchone()
             return row[0] if row else 0
+
+
+class BudgetDeferred(ValueError):
+    """A scheduling deferral; do not mark a stock unavailable."""
 
 
 class MarketUnavailable(ValueError):
@@ -91,7 +124,7 @@ class Market:
         self.cache = {}
         self.last_request = 0
 
-    def get(self, endpoint, *, priority=False, **params):
+    def get(self, endpoint, *, priority=False, purpose="trading", **params):
         key = validate_key(os.environ.get('TWELVE_DATA_API_KEY', ''))
         if endpoint not in ('quote', 'time_series', 'stocks'):
             raise ValueError('Endpoint has no configured API credit weight')
@@ -99,7 +132,7 @@ class Market:
         with Market.request_lock:
             if time.monotonic()<Market.blocked_until:
                 raise MarketUnavailable(Market.blocked_message+' Requests paused for up to 15 minutes after the failure; no additional API credit used.')
-            ApiBudget(os.getenv('DATA_DIR', '/data')).reserve(priority)
+            ApiBudget(os.getenv('DATA_DIR', '/data')).reserve(priority, purpose)
             time.sleep(max(0, 8 - (time.monotonic() - Market.last_global_request)))
             Market.last_global_request = time.monotonic()
             url = 'https://api.twelvedata.com/' + endpoint + '?' + urlencode(params)
@@ -156,3 +189,37 @@ def session_window(now):
     # Provider's market-open flag also excludes holidays and early closes.
     minutes = now.hour * 60 + now.minute
     return now.weekday() < 5 and 570 <= minutes < 960
+
+
+class ConnectionTest:
+    """Explicit, rate-limited read-only diagnostic; account state is untouched."""
+    def __init__(self):
+        self.lock=threading.Lock();self.last_started=None
+        self.result={'running':False,'at':None,'ok':None,'message':'No connection test since this service started.'}
+
+    def state(self):
+        with self.lock:return dict(self.result)
+
+    def start(self):
+        with self.lock:
+            if self.result['running']:raise ValueError('A connection test is already running.')
+            if self.last_started is not None and time.monotonic()-self.last_started<60:
+                raise ValueError('Wait one minute between connection tests.')
+            self.last_started=time.monotonic()
+            self.result={'running':True,'at':datetime.now(ZoneInfo('UTC')).isoformat(),'ok':None,'message':'Testing one AAPL daily-history request…'}
+        threading.Thread(target=self._run,daemon=True).start()
+
+    def _run(self):
+        ok=False
+        try:
+            data=Market().get('time_series',purpose='diagnostic',symbol='AAPL',exchange='NASDAQ',interval='1day',outputsize=1)
+            try:
+                meta=data['meta'];row=data['values'][0];value=float(row['close'])
+                datetime.strptime(row['datetime'][:10],'%Y-%m-%d')
+                valid=meta['symbol']=='AAPL' and meta['exchange']=='NASDAQ' and meta['currency']=='USD' and math.isfinite(value) and value>0
+            except (KeyError,TypeError,ValueError,IndexError):valid=False
+            if not valid:raise MarketUnavailable('Connection returned JSON, but the AAPL daily-history data was incomplete or invalid.')
+            ok=True;message='Connection passed: authenticated AAPL daily-history data received. This does not verify fresh trading quotes, catalogue access or a successful account check.'
+        except ValueError as exc:message=str(exc)
+        except Exception:message='Connection test could not finish. Check local service storage and network availability.'
+        with self.lock:self.result={'running':False,'at':datetime.now(ZoneInfo('UTC')).isoformat(),'ok':ok,'message':message}

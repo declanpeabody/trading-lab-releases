@@ -64,6 +64,21 @@ class UniverseTests(unittest.TestCase):
         self.assertTrue(held.issubset(self.scanner.status['checked']))
         self.assertFalse(any(c[0]=='time_series' and not c[2] for c in self.market.calls))
         self.assertEqual(self.scanner.status['history_batch'],[])
+    def test_scheduling_deferral_keeps_history_pending_and_cursor_retryable(self):
+        from market import BudgetDeferred
+        original=self.market.get
+        def deferred(endpoint,**params):
+            if endpoint=='time_series':raise BudgetDeferred('History preparation deferred for candidate checks.')
+            return original(endpoint,**params)
+        with patch.object(self.market,'get',side_effect=deferred):self.scan()
+        self.assertEqual(self.scanner.daily['errors'],{})
+        self.assertEqual(self.scanner.daily['attempted'],[])
+        self.assertEqual(self.scanner.state['screen_cursor'],0)
+        self.assertEqual(self.scanner.status['histories_pending'],300)
+        self.assertEqual(self.scanner.status['history_batch'],[])
+        self.scan();self.scan()
+        self.assertTrue(any(d['action']=='BUY' for d in self.scanner.status['decisions']))
+
     def test_day_rollover_defers_ranking_then_reuses_provider_verified_unchanged_grid(self):
         self.ledger.control('block');self.scan();cursor=self.scanner.state['screen_cursor']
         self.market.calls=[];self.scan(NOW+timedelta(days=3))
