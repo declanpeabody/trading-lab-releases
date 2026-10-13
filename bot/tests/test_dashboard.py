@@ -55,6 +55,12 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(result['error'],'Account storage unavailable')
             self.assertIn('worker',result)
 
+    def test_invalid_saved_key_visible_without_network_or_secret_exposure(self):
+        with patch.dict('os.environ',{'TWELVE_DATA_API_KEY':'PRIVATE\nSECRET'}),patch('market.urlopen') as request:
+            with self.get('/api/state') as response:state=json.load(response)
+            self.assertIn('saved API key contains',state['error'])
+            self.assertNotIn('PRIVATE',json.dumps(state));request.assert_not_called()
+
     def test_control_requires_csrf_and_persists(self):
         with self.get('/api/state') as response: token=json.load(response)['csrf']
         headers={'Authorization':self.auth,'Content-Type':'application/json'}

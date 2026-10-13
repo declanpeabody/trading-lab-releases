@@ -49,6 +49,16 @@ class MarketUnavailable(ValueError):
     """A shared transport/account failure, not an individual stock rejection."""
 
 
+def validate_key(value, allow_empty=False):
+    key=value.strip()
+    if not key:
+        if allow_empty:return key
+        raise MarketUnavailable('Setup needed: add the market-data API key using the Mac setup tool.')
+    if any(not 33<=ord(character)<=126 for character in key):
+        raise MarketUnavailable('Market data: the saved API key contains a space, line break or unsupported hidden character. Copy only the key, then use Mac setup option 5 to replace it. No request was sent.')
+    return key
+
+
 def response_error(code):
     # Never display response bodies, request URLs, exception text or credentials.
     try:code=int(code)
@@ -82,9 +92,7 @@ class Market:
         self.last_request = 0
 
     def get(self, endpoint, *, priority=False, **params):
-        key = os.environ.get('TWELVE_DATA_API_KEY', '').strip()
-        if not key:
-            raise MarketUnavailable('Setup needed: add the market-data API key using the Mac setup tool.')
+        key = validate_key(os.environ.get('TWELVE_DATA_API_KEY', ''))
         if endpoint not in ('quote', 'time_series', 'stocks'):
             raise ValueError('Endpoint has no configured API credit weight')
         # Share spacing and outage protection with research; never retry inside a request.
@@ -95,12 +103,15 @@ class Market:
             time.sleep(max(0, 8 - (time.monotonic() - Market.last_global_request)))
             Market.last_global_request = time.monotonic()
             url = 'https://api.twelvedata.com/' + endpoint + '?' + urlencode(params)
-            request = Request(url, headers={'Authorization': 'apikey ' + key, 'Accept': 'application/json'})
             failure=None
             try:
+                request = Request(url, headers={'Authorization': 'apikey ' + key, 'Accept': 'application/json'})
                 with urlopen(request, timeout=20) as response:
-                    data = json.load(response)
-                if not isinstance(data,dict):
+                    try:data = json.load(response)
+                    except (json.JSONDecodeError,UnicodeDecodeError):
+                        failure=MarketUnavailable('Market data: an HTTP response was received but its body was not valid JSON. Check provider availability or a network proxy.')
+                if failure:pass
+                elif not isinstance(data,dict):
                     failure=MarketUnavailable('Market data: unexpected response format; expected a JSON object.')
                 elif data.get('status')=='error':failure=response_error(data.get('code'))
             except HTTPError as exc:
@@ -108,8 +119,10 @@ class Market:
                 exc.close()
             except (URLError,OSError) as exc:
                 failure=connection_error(exc)
-            except (ValueError,UnicodeError):
-                failure=MarketUnavailable('Market data: response was not valid JSON. Check provider availability or a network proxy.')
+            except ValueError:
+                # urllib may reject a malformed header before any HTTP response.
+                # Never expose its exception text: it can contain the API key.
+                failure=MarketUnavailable('Market data: Python rejected the request or response handling before JSON decoding. Check the saved key and Mac proxy configuration. No provider response could be decoded.')
             if failure:
                 if isinstance(failure,MarketUnavailable):
                     Market.blocked_until=time.monotonic()+900

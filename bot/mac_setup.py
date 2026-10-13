@@ -18,6 +18,7 @@ PLIST = Path.home() / 'Library' / 'LaunchAgents' / (LABEL + '.plist')
 SOURCE = Path(__file__).resolve().parent
 URL = 'http://127.0.0.1:8765'
 from mac_update import FILES, apply_update
+from market import validate_key
 
 def write_private(path, data):
     temporary = path.with_suffix(path.suffix + '.tmp')
@@ -84,7 +85,7 @@ def install():
     if BASE.exists():
         raise SystemExit('Already installed, or a previous install needs review. Existing files preserved; use Start or Configure.')
     print('Installing a PAPER-ONLY bot. It will start when you log in.')
-    key = getpass.getpass('Twelve Data API key (hidden; Enter to add later): ').strip()
+    key = validate_key(getpass.getpass('Twelve Data API key (hidden; Enter to add later): '),allow_empty=True)
     BASE.mkdir(parents=True,mode=0o700)
     BASE.chmod(0o700)
     (BASE/'data').mkdir(mode=0o700)
@@ -102,7 +103,7 @@ def configure():
     path=BASE/'config.json'
     config=json.loads(path.read_text())
     key=getpass.getpass('New Twelve Data API key (hidden; Enter keeps current key): ').strip()
-    if key: config['TWELVE_DATA_API_KEY']=key
+    if key: config['TWELVE_DATA_API_KEY']=validate_key(key)
     write_private(path,json.dumps(config,indent=2))
     start()
 

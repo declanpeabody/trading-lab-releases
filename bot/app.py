@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from engine import Ledger
-from market import Market, session_window
+from market import Market, session_window, validate_key, MarketUnavailable
 from research import Research
 from ranked_scanner import RankedScanner, Journal
 from news import News
@@ -104,6 +104,11 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
                 state['worker']=worker_health(thread)
                 state['csrf'] = csrf
                 state['data_configured'] = bool(os.getenv('TWELVE_DATA_API_KEY'))
+                # Pure local validation also works outside trading hours. Never
+                # include the key or make a provider request during page loads.
+                if state['data_configured']:
+                    try:validate_key(os.environ['TWELVE_DATA_API_KEY'])
+                    except MarketUnavailable as exc:state['error']=str(exc)
                 self.respond(200, json.dumps(state, allow_nan=False))
             elif self.path == '/api/research' and research:
                 self.respond(200, json.dumps(research.state(), allow_nan=False))

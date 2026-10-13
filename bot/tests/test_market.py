@@ -65,3 +65,30 @@ class MarketErrors(unittest.TestCase):
         with patch.dict(os.environ,{'TWELVE_DATA_API_KEY':''}):
             with self.assertRaisesRegex(MarketUnavailable,'Setup needed'):self.market.get('quote',symbol='AAPL')
         self.transport.assert_not_called();self.assertEqual(ApiBudget(self.directory).used(),0)
+
+    def test_malformed_key_is_reported_before_network_or_budget_use(self):
+        for key in ('first\nsecond','first second','first\rsecond','first\tsecond','first\u200bsecond'):
+            with self.subTest(key_type='hidden or whitespace'),patch.dict(os.environ,{'TWELVE_DATA_API_KEY':key}):
+                with self.assertRaisesRegex(MarketUnavailable,'saved API key contains') as err:self.market.get('stocks')
+                self.assertNotIn(key,str(err.exception))
+        self.transport.assert_not_called();self.assertEqual(ApiBudget(self.directory).used(),0)
+
+    def test_header_value_error_is_not_mislabelled_as_json(self):
+        self.transport.side_effect=ValueError('Invalid header PRIVATE-TEST-SECRET')
+        with self.assertRaises(MarketUnavailable) as err:self.market.get('stocks')
+        message=str(err.exception)
+        self.assertIn('Python rejected',message)
+        self.assertNotIn('not valid JSON',message)
+        self.assertNotIn('PRIVATE-TEST-SECRET',message)
+
+    def test_invalid_json_requires_an_actual_response_body(self):
+        self.transport.return_value=io.BytesIO(b'<html>PRIVATE-TEST-SECRET</html>')
+        with self.assertRaisesRegex(MarketUnavailable,'HTTP response was received') as err:self.market.get('stocks')
+        self.assertNotIn('PRIVATE-TEST-SECRET',str(err.exception))
+
+    def test_outer_clipboard_whitespace_is_trimmed(self):
+        with patch.dict(os.environ,{'TWELVE_DATA_API_KEY':'  PRIVATE-TEST-SECRET\n'}):
+            self.transport.return_value=io.BytesIO(b'{"data":[]}')
+            self.assertEqual(self.market.get('stocks'),{'data':[]})
+        request=self.transport.call_args.args[0]
+        self.assertEqual(request.get_header('Authorization'),'apikey PRIVATE-TEST-SECRET')
