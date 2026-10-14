@@ -482,3 +482,55 @@ class ShadowTrials:
             s.update(started=s['started'] or stamp,last=stamp,checks=s['checks']+1,decisions=actions,
                 days=sorted(set(s['days']+[day]))[-252:],message='Collecting prospective evidence; active account unchanged')
         self.change(update)
+
+
+class ReliableExperiments:
+    """Optional research failures never prevent held-position checks.
+
+    A separate validated setting survives experiment-store failure. New entries
+    are deferred while research state is unavailable; exits still use live data.
+    """
+    def __init__(self,directory):
+        self.directory=Path(directory);self.backend=None;self.error=None
+        self.setting=self.directory/'active-purchase.json'
+        self.last_limit=100;self.cached=False
+        try:
+            value=json.loads(self.setting.read_text())['active']
+            if type(value) is int and value in EXPERIMENT_SIZES:self.last_limit=value;self.cached=True
+        except (OSError,ValueError,KeyError,TypeError):pass
+
+    def _call(self,name,*args,**kwargs):
+        try:
+            if self.backend is None:self.backend=Experiments(self.directory)
+            result=getattr(self.backend,name)(*args,**kwargs)
+            if name=='state':
+                limit=result['active']
+                if type(limit) is not int or limit not in EXPERIMENT_SIZES:raise ValueError('Invalid setting')
+                if not self.cached or not self.setting.exists() or limit!=self.last_limit:
+                    import tempfile,os
+                    with tempfile.NamedTemporaryFile(mode='w',dir=self.directory,delete=False) as f:
+                        temporary=Path(f.name);json.dump({'active':limit},f);f.flush();os.fsync(f.fileno())
+                    try:temporary.chmod(0o600);temporary.replace(self.setting)
+                    finally:temporary.unlink(missing_ok=True)
+                self.last_limit=limit;self.cached=True
+            self.error=None
+            return result
+        except Exception:
+            self.backend=None
+            self.error='Strategy experiment storage unavailable. New entries deferred; held-stock checks and exits continue. Repair or restore experiment storage; existing evidence was preserved.'
+            if name=='control':raise ValueError(self.error) from None
+            return None
+
+    def state(self):
+        result=self._call('state')
+        return result if result is not None else dict(enabled=False,automatic=False,active=self.last_limit,
+            previous=self.last_limit,round=0,phase='unavailable',message=self.error,error=self.error,
+            books={},metrics={},qualified_sessions=0,required_sessions=EXPERIMENT_SESSIONS,
+            reports=[],events=[],note='Last validated purchase setting shown; no new entries until storage recovers.')
+    def active_limit(self):return self.state()['active']
+    def holdings(self):return self._call('holdings') or []
+    def observe(self,*args,**kwargs):return self._call('observe',*args,**kwargs)
+    def promote(self,*args,**kwargs):return self._call('promote',*args,**kwargs)
+    def miss(self,*args,**kwargs):return self._call('miss',*args,**kwargs)
+    def invalidate(self,*args,**kwargs):return self._call('invalidate',*args,**kwargs)
+    def control(self,*args,**kwargs):return self._call('control',*args,**kwargs)

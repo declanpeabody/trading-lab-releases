@@ -89,6 +89,8 @@ class Updates:
         if self.status_path.exists():
             try:info=json.loads(self.status_path.read_text())
             except (OSError,ValueError):pass
+        if (self.base/'data'/'update_hold').exists():
+            info.update(recovery_required=True,message='Trading held for update verification. If interrupted, use Mac setup option 11 for verified recovery; do not delete the hold file.')
         attempt=read_json(self.attempt_path,{})
         return info|{'installed_version':VERSION,'configured':self.config.exists() and self.key.exists(),'busy':self.busy,
             'automatic':read_json(self.preferences,{}).get('automatic',False) is True,

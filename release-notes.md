@@ -1,11 +1,11 @@
-# 2026.10.14.5 — Holdings reliability and research comparisons
+# 2026.10.14.6 — Three reliability fixes
 
-Held-stock checks now complete before optional scanning. Freshness checks retain the 120-second limit. Accounts without entry capacity skip candidate quotes when experiments are disabled. The catalogue rejects identifiable warrants, units, rights and preferred shares.
+Strategy experiment storage is now isolated from held-stock checks. A separate validated purchase setting survives experiment-storage failure. New entries wait while experiment settings are unavailable; fresh-price valuation and exits continue. Damaged experiment data is preserved rather than reset.
 
-Research adds three opt-in, separate paper books: a £200 reference; smaller risk-sized allocations with a £200 cash reserve and correlation controls; and an SEC filing-risk entry filter. These books cannot promote settings into the active account. Existing strategy and purchase-size experiment rules are unchanged.
+Unreadable news configuration or storage disables only the optional news component. The dashboard displays the problem and the paper trading service can still start. Existing news files are preserved for repair.
 
-News can optionally retrieve bounded SEC document excerpts with source hashes and retrieval times. This is observation, not sentiment prediction or comprehensive news/forum research. Monitoring reports saved worker progress, news coverage and comparison results.
+An update hold now shows explicitly in worker health and the dashboard. Process liveness is separate from trading readiness so installation can verify a deliberately held service. Future updates record durable phases and backup hashes. Mac setup option 11 validates a complete backup and account database before restoring an interrupted update; interrupted data is retained. It refuses incomplete or altered backups and cannot silently roll back an active account.
 
-Mac setup options 9/10 configure or disable a separate monitor login service. Its runtime key is stored in an owner-only local file, not encrypted Keychain storage. Actual login startup and authentication require verification on the iMac. The Mac must remain awake.
+Recovery requires a verified transaction record from this updater. Older interrupted installations without that record need manual review; never delete the hold file to bypass recovery. Native macOS launchd behavior still requires local verification.
 
-Paper trading only. Existing settings and history are preserved. New research comparisons and document retrieval require opt-in. No paid subscription is enabled.
+Paper trading only. Existing balances, positions, controls and history are preserved. This release addresses the three high-severity reliability findings; atomic execution journaling, redirect hardening and SEC document retries remain separate work.
