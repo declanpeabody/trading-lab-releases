@@ -1,6 +1,6 @@
-# Draft batch: data reliability and prospective comparisons
+# Release batch 2026.10.14.5
 
-Prepared at Declan's request. Not released; installed version remains 2026.10.14.4.
+Declan authorized publication on 14 October 2026. Installation is confirmed separately through the dashboard.
 
 - Commit mandatory held-stock checks before optional candidate requests. Revalidate all quotes before a second transition; retain the 120-second ceiling.
 - Skip candidate quotes when the account has no entry capacity and comparisons are disabled. Experiments still share at most six optional quote slots.
@@ -12,4 +12,4 @@ Prepared at Declan's request. Not released; installed version remains 2026.10.14
 
 The active stock selection and existing purchase-size experiment promotion rules are unchanged. These comparisons are not proof of improved returns. Allocation is per-cycle, not a daily entry cap. SEC coverage is not comprehensive news coverage. Sector caps, licensed forum/news ingestion, and an exact intraday scanner replay remain future work; the existing daily replay is approximate.
 
-Before release: bump version, review changes, run release gates and publish only when requested. After installation, verify held checks, monitor login/revocation, and opt-in comparisons on the iMac. No paid service or new subscription is enabled.
+Release gates: full automated suite, browser script checks and signed asset verification. After installation, verify held checks, monitor login/revocation, and opt-in comparisons on the iMac. No paid service or new subscription is enabled.
