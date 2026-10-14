@@ -95,6 +95,19 @@ class DashboardTests(unittest.TestCase):
             start.assert_called_once()
         self.assertEqual(self.ledger.read(),before)
 
+    def test_monitoring_toggle_is_local_authenticated_and_csrf_protected(self):
+        with patch.dict('os.environ',{'DATA_DIR':self.temp.name}):
+            with self.get('/api/state') as r:state=json.load(r)
+            self.assertFalse(state['monitoring_enabled'])
+            headers={'Authorization':self.auth,'Content-Type':'application/json'}
+            request=lambda:Request(self.base+'/api/monitoring',data=b'{"enabled":true}',headers=headers)
+            with self.assertRaises(HTTPError) as error:urlopen(request(),timeout=2)
+            self.assertEqual(error.exception.code,403)
+            headers['X-CSRF-Token']=state['csrf']
+            with urlopen(request(),timeout=2) as r:self.assertEqual(r.status,200)
+            with self.get('/api/state') as r:self.assertTrue(json.load(r)['monitoring_enabled'])
+            self.assertTrue(self.ledger.read()['paused'])
+
     def test_control_requires_csrf_and_persists(self):
         with self.get('/api/state') as response: token=json.load(response)['csrf']
         headers={'Authorization':self.auth,'Content-Type':'application/json'}
