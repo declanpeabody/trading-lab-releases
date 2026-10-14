@@ -202,6 +202,10 @@ class RankedScanner(Scanner):
             notes.append('Candidate quotes deferred: no active entry capacity and experiments disabled.')
         elif not experiments_need:
             requested=selected=selected[:min(6,5-len(live['positions'])+1)]
+        if getattr(self.experiments,'error',None):
+            needs_entries=False;requested=[]
+            self.status['optional_error']=self.experiments.error
+            notes.append(self.experiments.error)
         self.status['selected']=selected
         self.status['quote_requested']=requested
         try:

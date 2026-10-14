@@ -15,9 +15,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 from engine import Ledger
 from market import Market, session_window, validate_key, MarketUnavailable, ApiBudget, ConnectionTest
-from research import Research, Experiments, ShadowTrials
+from research import Research, Experiments, ShadowTrials, ReliableExperiments
 from ranked_scanner import RankedScanner, Journal
-from news import News
+from news import News, optional_news
 from updater import Updates
 from version import VERSION
 
@@ -29,7 +29,7 @@ WORKER = {'state':'starting','message':'Worker starting','heartbeat':time.time()
 def worker_health(thread):
     info=dict(WORKER);alive=thread.is_alive()
     overdue=time.time()>info['due']+900
-    return info|{'alive':alive,'healthy':alive and not overdue and info['state']!='failed',
+    return info|{'alive':alive,'healthy':alive and not overdue and info['state'] not in ('failed','update_hold'),
         'message':('Trading worker stopped; restart the service.' if not alive else
                    'Trading worker overdue; check the Mac service.' if overdue else info['message'])}
 
@@ -64,9 +64,12 @@ def worker(ledger):
         WORKER={'state':'checking','message':'Checking worker and account','heartbeat':time.time(),'due':time.time()}
         persist_worker()
         try:
+            if (Path(os.getenv('DATA_DIR','/data'))/'update_hold').exists():
+                WORKER={'state':'update_hold','message':'Trading held for update verification or recovery. If installation was interrupted, use Mac setup option 11.','heartbeat':time.time(),'due':time.time()+60}
+                persist_worker();STOP.wait(60);continue
             if scanner is None:
                 directory=os.getenv('DATA_DIR','/data')
-                scanner=RankedScanner(directory,experiments=Experiments(directory))
+                scanner=RankedScanner(directory,experiments=ReliableExperiments(directory))
             if not (Path(os.getenv('DATA_DIR','/data'))/'update_hold').exists() and not ledger.read()['paused'] and session_window(datetime.now(ZoneInfo('America/New_York'))):
                 try:scanner.cycle(ledger)
                 except ValueError as exc:ledger.fail(str(exc))
@@ -98,6 +101,7 @@ def no_trade_reasons(state):
     if not session_window(datetime.now(ZoneInfo('America/New_York'))):reasons.append('Outside the weekday 09:30–16:00 New York trading window. Provider market-open checks also apply.')
     if not state.get('data_configured'):reasons.append('Market-data key is missing.')
     if state.get('error'):reasons.append('Last account/data error: '+state['error'])
+    if state.get('experiment_error'):reasons.append(state['experiment_error'])
     for key,message in [('buy_block','New buys are blocked by your control.'),('risk_latched','Total drawdown buying lock is active.'),('day_block','Daily drawdown buying block is recorded; it is reassessed on the next successful session check.')]:
         if state.get(key):reasons.append(message)
     if any(p.get('reconciliation') for p in state.get('positions',{}).values()):reasons.append('Corporate-action verification is required before account decisions resume.')
@@ -142,8 +146,12 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
 
         def do_GET(self):
             if self.path == '/healthz':
-                healthy=worker_health(thread)['healthy']
-                self.respond(200 if healthy else 503, json.dumps({'running':healthy,'version':VERSION}))
+                health=worker_health(thread)
+                # Liveness permits the updater to verify a deliberately held new
+                # process. Trading readiness remains explicitly false.
+                running=health['healthy'] or (health['alive'] and health['state']=='update_hold')
+                self.respond(200 if running else 503, json.dumps({'running':running,'trading_ready':health['healthy'],
+                    'worker_state':health['state'],'message':health['message'],'version':VERSION}))
                 return
             if not self.authorized(): return
             if self.path == '/api/state':
@@ -152,7 +160,9 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
                     self.respond(503,json.dumps({'error':'Account storage unavailable','worker':worker_health(thread)}));return
                 state['worker']=worker_health(thread)
                 if experiments:
-                    try:state['active_purchase_limit']=experiments.active_limit()
+                    try:
+                        state['active_purchase_limit']=experiments.active_limit()
+                        if getattr(experiments,'error',None):state['experiment_error']=experiments.error
                     except Exception:state['experiment_error']='Experiment settings unavailable; check Strategy Experiments.'
                 state['csrf'] = csrf
                 state['data_configured'] = bool(os.getenv('TWELVE_DATA_API_KEY'))
@@ -437,7 +447,7 @@ def main():
     try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError: raise SystemExit('Another worker is already using this data disk.')
     ledger = Ledger(directory/'paper.sqlite3')
-    news = News(directory)
+    news = optional_news(directory)
     news_thread = threading.Thread(target=news.worker, args=(ledger, STOP), daemon=True)
     news_thread.start()
     updates=Updates(ROOT) if sys.platform=='darwin' else None
@@ -445,7 +455,7 @@ def main():
     thread = threading.Thread(target=worker, args=(ledger,), daemon=True)
     thread.start()
     server = ThreadingHTTPServer((os.getenv('BIND_HOST', '127.0.0.1'), int(os.getenv('PORT','8080'))),
-        handler_factory(ledger,os.getenv('DASHBOARD_USER','declan'),password,thread,Research(directory),news,updates,Journal(directory),Experiments(directory)))
+        handler_factory(ledger,os.getenv('DASHBOARD_USER','declan'),password,thread,Research(directory),news,updates,Journal(directory),ReliableExperiments(directory)))
     print('Paper-trading dashboard ready; real-money execution is not implemented.', flush=True)
     try: server.serve_forever()
     finally:

@@ -175,7 +175,8 @@ def main():
     print('1. Install\n2. Open dashboard\n3. Start / restore login startup\n4. Stop until next login\n5. Change market-data key\n6. Disable login startup and stop\n7. Show local dashboard password')
     print('8. Upgrade installed bot (preserve settings and history)')
     print('9. Configure monitor login startup\n10. Disable monitor login startup and remove saved runtime key')
-    action=input('Choose 1–10: ').strip()
+    print('11. Recover interrupted update from verified backup')
+    action=input('Choose 1–11: ').strip()
     if action=='1': install()
     elif action=='2': subprocess.run(['/usr/bin/open',URL],check=False)
     elif action=='3': start()
@@ -198,6 +199,10 @@ def main():
         subprocess.run(['/usr/bin/open',URL+'/research'],check=False)
     elif action=='9': configure_monitor()
     elif action=='10': disable_monitor()
+    elif action=='11':
+        from update_worker import recover_interrupted
+        recover_interrupted(BASE)
+        print('Verified previous application and paper account restored.')
     else: print('No changes made.')
 
 if __name__=='__main__':

@@ -274,3 +274,18 @@ class News:
                 with self.lock: self.info['error']='News observer error; paper trading unaffected.'
             self.wake.wait(1800)
             self.wake.clear()
+
+
+class UnavailableNews:
+    """Visible inert fallback; never repairs or overwrites damaged evidence."""
+    def __init__(self):self.wake=threading.Event()
+    def state(self,all_events=False):
+        return dict(enabled=False,busy=False,documents=False,events=[],coverage=[],last_attempt=None,last_success=None,
+            error='News storage could not be loaded. News is disabled; trading and dashboard remain available. Restore or repair news configuration/storage locally; existing files were preserved.')
+    def configure(self,payload):raise ValueError(self.state()['error'])
+    def worker(self,ledger,stop):return
+
+
+def optional_news(directory):
+    try:return News(directory)
+    except Exception:return UnavailableNews()
