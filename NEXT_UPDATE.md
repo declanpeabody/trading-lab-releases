@@ -1,17 +1,12 @@
-# Next batch — not released
+# Batch approved for release — 2026.10.14.4
 
-Current published version remains **2026.10.14.3**. Do not merge to main, bump the
-version or publish until Declan says **release the update**. Keep subsequent
-requested changes together on this batch branch.
+Declan authorized release on 14 October 2026. This batch contains optional
+read-only monitoring, a local enable/disable switch and a private setup guide.
 
-Prepared:
-- Optional read-only monitoring tools for saved account status and recent decisions.
-- Local dashboard enable/disable control; disabled by default.
-- Private connection setup guide in docs/PRIVATE_MONITORING.md.
+Still pending on the iMac:
+- Install this signed release and configure the tunnel client.
+- Enable sharing locally and verify a real status read and revocation.
+- Confirm any applicable account costs before paid use.
 
-Pending external setup:
-- Confirm the user's ChatGPT custom-app/tunnel access and applicable costs.
-- Configure tunnel-client on the iMac after the approved release is installed.
-- Verify a real status read and revocation. No continuous monitoring is active.
-
-A version bump and combined release notes are required when release is requested.
+No continuous monitoring is active. Future changes should be batched separately
+and released when requested.

@@ -1,4 +1,4 @@
-# Private paper-bot monitoring — prepared, not released or connected
+# Private paper-bot monitoring — 2026.10.14.4
 
 This batch adds three read-only MCP tools: `get_bot_status`,
 `get_recent_decisions`, and `get_recent_trades`. The latter two accept an optional
@@ -14,7 +14,7 @@ by the existing 90-day/250,000-observation retention.
 
 ## Controls and limitations
 
-Sharing defaults to disabled. After the batch is released and installed, enable
+Sharing defaults to disabled. After this release is installed, enable
 **Overview → Private monitoring → Enable read-only sharing** locally. Disabling
 it rejects new tool data reads, including from an already running connector.
 It cannot recall information already delivered to ChatGPT. The switch does not
