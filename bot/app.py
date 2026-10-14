@@ -170,7 +170,7 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
                 nonce = secrets.token_urlsafe(24)
                 body = (ROOT/({'/research':'research.html','/news':'news.html','/updates':'updates.html'}.get(self.path,'dashboard.html'))).read_text().replace('__NONCE__',nonce).replace('__TOP_NAV__',top_navigation(self.path,nonce))
                 self.respond(200, body, 'text/html; charset=utf-8', {
-                    'Content-Security-Policy':f"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; connect-src 'self'; frame-src https://www.tradingview-widget.com; img-src data:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"})
+                    'Content-Security-Policy':f"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; connect-src 'self'; frame-src 'none'; img-src data:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"})
             else:
                 self.respond(404, '{"error":"Not found"}')
 

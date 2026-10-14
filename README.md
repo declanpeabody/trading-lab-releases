@@ -132,12 +132,9 @@ environment. See bot/START_HERE_MAC.md and bot/VALIDATION.md for limitations.
 
 ## Dashboard market overview
 
-Version 2026.10.12.3 adds eight navigation tabs and an external TradingView market
-panel. This uses no Twelve Data credits and never changes trading decisions.
-Index quotes can be restricted or delayed. The optional ETF view shows fund share
-prices rather than index levels; CNBC links are supplied for the exact indices.
-See TradingView's widget data policy:
-https://www.tradingview.com/widget-docs/faq/data/
+The Markets tab provides links to CNBC pages for the five US indices. The embedded
+TradingView strip was removed in 2026.10.14.3 after unreliable rendering and stale
+displays. Opening the dashboard no longer loads an external market widget.
 
 ### Connection tests and request scheduling
 
