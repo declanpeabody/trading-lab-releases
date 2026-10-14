@@ -151,6 +151,9 @@ class ExperimentLedger(PaperLedger):
         from engine import PRICE_ALLOWANCE, FX_ALLOWANCE
         self.body=copy.deepcopy(body);self.lock=threading.RLock()
         self.price_allowance=PRICE_ALLOWANCE;self.fx_allowance=FX_ALLOWANCE
+    def valid_purchase_limit(self,value):
+        return type(value) is int and 1<=value<=200
+
     def read(self):
         import copy
         return copy.deepcopy(self.body)
@@ -359,3 +362,123 @@ class Experiments:
             s['day']['checks']+=1;s['day']['last']=timestamp;s['last_stamp']=timestamp
             s['message']=f"Collecting {s['phase']} observations; settings remain fixed during this phase."
         self._change(change)
+
+
+class ShadowTrials:
+    """Prospective, opt-in comparisons. No promotion or active-ledger reference."""
+    NAMES=('baseline','allocation','filing_guard')
+    def __init__(self,directory):
+        import sqlite3
+        self.directory=Path(directory);self.path=self.directory/'shadow-trials.sqlite3'
+        self.directory.mkdir(parents=True,exist_ok=True)
+        with sqlite3.connect(self.path) as db:
+            db.execute('CREATE TABLE IF NOT EXISTS trials(id INTEGER PRIMARY KEY,body TEXT NOT NULL)')
+            db.execute('INSERT OR IGNORE INTO trials VALUES(1,?)',(json.dumps(self.initial()),))
+        self.path.chmod(0o600)
+    @classmethod
+    def initial(cls):
+        from engine import new_paper_state
+        return dict(schema=1,enabled=False,started=None,last=None,checks=0,misses=0,days=[],message='Not started',
+            books={n:new_paper_state()|{'paused':False} for n in cls.NAMES},closes={n:0 for n in cls.NAMES},
+            decisions=[],invalid=False)
+    def change(self,fn):
+        import sqlite3
+        with sqlite3.connect(self.path,timeout=10) as db:
+            db.execute('BEGIN IMMEDIATE');s=json.loads(db.execute('SELECT body FROM trials WHERE id=1').fetchone()[0])
+            if s.get('schema')!=1:raise ValueError('Unknown trial schema')
+            value=fn(s);db.execute('UPDATE trials SET body=? WHERE id=1',(json.dumps(s,allow_nan=False),));return value
+    def state(self):
+        import sqlite3
+        with sqlite3.connect(self.path) as db:s=json.loads(db.execute('SELECT body FROM trials WHERE id=1').fetchone()[0])
+        return s|{'metrics':{k:experiment_metrics(b,[],s['closes'][k]) for k,b in s['books'].items()},
+            'note':'Prospective shared-data paper comparisons, never promoted automatically. Baseline: £200 cap. Allocation: £5 modelled price-risk budget, £150 cap, £200 cash reserve, two new entries per cycle and 0.8 positive correlation filter. Filing guard: £200 cap, requires SEC coverage within one hour and defers entries with a risk-coded filing first seen within seven days. This is not a news sentiment model. No coverage means no filing-guard buy. All accounts freeze together on missing holdings data. Returns include modelled exit costs; gaps can exceed the modelled risk budget. No claim of statistical significance.'}
+    def control(self,action,enabled=None):
+        def update(s):
+            if action=='enabled' and type(enabled) is bool:
+                if enabled and s['invalid']:raise ValueError('Restart invalid comparison before enabling')
+                s['enabled']=enabled
+            elif action=='restart':s.clear();s.update(self.initial());s['enabled']=True
+            else:raise ValueError('Invalid trial control')
+        self.change(update)
+    def holdings(self):
+        s=self.state();return sorted({x for b in s['books'].values() for x in b['positions']}) if s['enabled'] else []
+    def invalidate(self,reason):
+        self.change(lambda s:s.update(enabled=False,invalid=True,message=reason))
+    def miss(self,reason):
+        def update(s):
+            if s['enabled']:s.update(misses=s['misses']+1,message=reason)
+        self.change(update)
+    def news_gate(self,symbol,stamp):
+        import sqlite3
+        from contextlib import closing
+        at=datetime.fromisoformat(stamp)
+        try:
+            path=self.directory/'news'/'events.sqlite3'
+            with closing(sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True)) as db:
+                info=json.loads(db.execute('SELECT body FROM meta WHERE id=1').fetchone()[0])
+                checked=next(x['checked_at'] for x in info['coverage'] if x['symbol']==symbol and x.get('checked_at'))
+                age=(at-datetime.fromisoformat(checked)).total_seconds()
+                if not 0<=age<=3600:return False,'SEC coverage missing, future-dated or older than one hour'
+                for row in db.execute("SELECT body FROM events WHERE json_extract(body,'$.symbol')=?",(symbol,)):
+                    e=json.loads(row[0]);age=(at-datetime.fromisoformat(e['first_seen'])).total_seconds()
+                    if 0<=age<=7*86400 and e.get('flag')=='Risk review':return False,'Recent SEC risk-coded filing; experimental entry deferred'
+            return True,'Fresh SEC metadata coverage; no recent risk-coded filing observed'
+        except (OSError,sqlite3.Error,ValueError,KeyError,TypeError,StopIteration):return False,'SEC coverage unavailable'
+    @staticmethod
+    def correlated(a,b,bars):
+        import statistics
+        x=bars.get(a,[]);y=bars.get(b,[])
+        if len(x)!=50 or len(y)!=50 or [r['datetime'] for r in x]!=[r['datetime'] for r in y]:return True
+        rx=[float(x[i]['close'])/float(x[i-1]['close'])-1 for i in range(1,50)]
+        ry=[float(y[i]['close'])/float(y[i-1]['close'])-1 for i in range(1,50)]
+        if statistics.pstdev(rx)==0 or statistics.pstdev(ry)==0:return True
+        return statistics.correlation(rx,ry)>.8
+    def observe(self,prices,bars,fx,day,stamp,entries,buy_block=False):
+        from engine import signal
+        from strategy import assess
+        def update(s):
+            if not s['enabled']:return
+            if s['last'] and (datetime.fromisoformat(stamp)-datetime.fromisoformat(s['last'])).total_seconds()<900:return
+            required={x for b in s['books'].values() for x in b['positions']}|set(entries)
+            if not required.issubset(prices) or not required.issubset(bars) or not prices:
+                s.update(misses=s['misses']+1,message='Incomplete shared snapshot; all trial books held');return
+            histories={x:[float(r['close']) for r in bars[x]] for x in required}
+            updated={};actions=[]
+            for name,body in s['books'].items():
+                ledger=ExperimentLedger(body);ledger.body['buy_block']=bool(buy_block)
+                chosen=[x for x in entries if x not in body['positions'] and signal(histories[x],prices[x])=='buy']
+                cap=200
+                if name=='allocation':
+                    selected=[]
+                    for symbol in chosen:
+                        if any(self.correlated(symbol,other,bars) for other in list(body['positions'])+selected):
+                            actions.append({'model':name,'symbol':symbol,'action':'SKIP','reason':'Correlation above 0.8 or insufficient aligned history'});continue
+                        selected.append(symbol)
+                        if len(selected)==2:break
+                    cap=min([150]+[5/max(.05,2*assess(bars[x])['volatility_pct']/100) for x in selected])
+                    chosen=selected[:max(0,int((body['cash']-200)//cap))]
+                elif name=='filing_guard':
+                    allowed=[]
+                    for symbol in chosen:
+                        ok,reason=self.news_gate(symbol,stamp)
+                        actions.append({'model':name,'symbol':symbol,'action':'REVIEW','reason':reason})
+                        if ok:allowed.append(symbol)
+                    chosen=allowed
+                symbols=list(body['positions'])+chosen
+                # Isolated books accept bounded whole-pound risk allocations.
+                if name=='allocation':
+                    cap=max(1,min(150,int(cap)))
+                if symbols:
+                    decisions=ledger.cycle(prices,histories,fx,day,stamp,symbols=symbols,history_rows=bars,
+                        purchase_limit=cap) or []
+                else:
+                    ledger.body.update(last_check=stamp,last_success=stamp,error=None,equity=ledger.body['cash']);decisions=[]
+                if ledger.read().get('error'):raise ValueError('Trial corporate-action verification required')
+                book=ledger.read();metric=experiment_metrics(book,[],0);peak=max(book.get('experiment_peak',1000),metric['equity'])
+                book['experiment_peak']=peak;book['experiment_drawdown']=max(book.get('experiment_drawdown',0),(peak-metric['equity'])/peak*100)
+                updated[name]=(book,sum(d['action']=='SELL' for d in decisions))
+                actions.extend(dict(model=name,**d) for d in decisions)
+            for name,(book,closed) in updated.items():s['books'][name]=book;s['closes'][name]+=closed
+            s.update(started=s['started'] or stamp,last=stamp,checks=s['checks']+1,decisions=actions,
+                days=sorted(set(s['days']+[day]))[-252:],message='Collecting prospective evidence; active account unchanged')
+        self.change(update)

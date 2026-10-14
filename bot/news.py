@@ -1,4 +1,4 @@
-"""Read-only SEC filing observer. No ledger/order writes, LLM, or price requests."""
+"""Read-only SEC metadata and opt-in document evidence. No active trading writes."""
 import hashlib
 import json
 import os
@@ -72,6 +72,31 @@ def events_from(payload, symbol, cik, seen):
     return rows
 
 
+def document_evidence(body, received_at):
+    """Deterministic text extraction, not sentiment, advice or instruction execution."""
+    from html.parser import HTMLParser
+    class Text(HTMLParser):
+        def __init__(self):super().__init__();self.parts=[];self.hidden=0
+        def handle_starttag(self,tag,attrs):
+            if tag in ('script','style'):self.hidden+=1
+            if tag in ('p','div','br','tr'):self.parts.append('\n')
+        def handle_endtag(self,tag):
+            if tag in ('script','style'):self.hidden=max(0,self.hidden-1)
+        def handle_data(self,value):
+            if not self.hidden:self.parts.append(value)
+    parser=Text();parser.feed(body)
+    text=' '.join(' '.join(parser.parts).split())
+    phrases=('bankruptcy','cybersecurity','material impairment','going concern','revenue','guidance','net income','agreement')
+    excerpts=[]
+    for phrase in phrases:
+        found=re.search(re.escape(phrase),text,re.I)
+        if found:excerpts.append({'term':phrase,'excerpt':text[max(0,found.start()-100):found.end()+220]})
+    return {'received_at':received_at,'sha256':hashlib.sha256(body.encode()).hexdigest(),
+            'characters':len(text),'evidence':excerpts[:6],
+            'summary':'Document retrieved; '+(', '.join(e['term'] for e in excerpts) or 'no configured terms found')+'.',
+            'limitation':'Keyword excerpts can include boilerplate or historical references. No earnings surprise, sentiment or price prediction is inferred.'}
+
+
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs): return None
 
@@ -101,13 +126,25 @@ class SecClient:
         except (OSError, json.JSONDecodeError):
             raise ValueError('SEC connection or JSON response failed; paper trading is unaffected.') from None
 
+    def document(self,url):
+        if not re.fullmatch(r'https://www\.sec\.gov/Archives/edgar/data/\d+/\d+/[A-Za-z0-9_.-]+\.(?:htm|html|txt)',url):
+            raise ValueError('SEC document endpoint not permitted')
+        with self.lock:
+            time.sleep(max(0,1.1-(time.monotonic()-SecClient.last)));SecClient.last=time.monotonic()
+        req=Request(url,headers={'User-Agent':'DeclanTradingLab/1.0 '+self.contact,'Accept':'text/html,text/plain'})
+        try:
+            with build_opener(NoRedirect()).open(req,timeout=20) as response:body=response.read(3_000_001)
+            if len(body)>3_000_000:raise ValueError('Document exceeds 3 MB limit')
+            return body.decode('utf-8',errors='replace')
+        except OSError:raise ValueError('SEC document unavailable; no access bypass attempted') from None
+
 
 class News:
     def __init__(self, directory, client_factory=SecClient):
         self.directory = Path(directory)/'news'
         self.directory.mkdir(parents=True, exist_ok=True)
         self.config_path = self.directory/'config.json'
-        self.config = {'enabled': False, 'contact': ''}
+        self.config = {'enabled': False, 'contact': '', 'documents':False}
         if self.config_path.exists(): self.config.update(json.loads(self.config_path.read_text()))
         self.db = sqlite3.connect(self.directory/'events.sqlite3', check_same_thread=False)
         self.db.execute('CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, body TEXT NOT NULL)')
@@ -134,7 +171,9 @@ class News:
                 contact = str(payload.get('contact','')).strip()
                 if len(contact)>200 or not re.fullmatch(r'[A-Za-z0-9._+%-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}',contact):
                     raise ValueError('Enter a valid contact email; it will be sent to the SEC in request headers')
-                self.config = {'enabled':True,'contact':contact}
+                documents=payload.get('documents',False)
+                if type(documents) is not bool:raise ValueError('Document option must be true or false')
+                self.config = {'enabled':True,'contact':contact,'documents':documents}
             else: raise ValueError('Unknown news control')
             tmp = self.config_path.with_suffix('.tmp')
             tmp.write_text(json.dumps(self.config))
@@ -146,7 +185,8 @@ class News:
         with self.lock:
             rows = self.db.execute("SELECT body FROM events ORDER BY json_extract(body,'$.first_seen') DESC, json_extract(body,'$.filing_date') DESC, rowid DESC" + ('' if all_events else ' LIMIT 100')).fetchall()
             return self.info | {'enabled':self.config['enabled'],'busy':self.busy,
-                'mode':'Observation only · SEC filing metadata',
+                'documents':self.config.get('documents',False),
+                'mode':'Observation only · SEC filings; optional document evidence',
                 'events':[json.loads(row[0]) for row in rows]}
 
     def poll(self, account):
@@ -161,7 +201,7 @@ class News:
             selected = list(dict.fromkeys(list(account.get('positions',{})) +
                 account.get('scanner',{}).get('selected',[])))[:12]
             if not selected: selected = ['AAPL','MSFT','AMZN']
-            coverage=[]
+            coverage=[];document_budget=2
             try:
                 if time.time()-self.map_time>86400:
                     raw = client.get('https://www.sec.gov/files/company_tickers.json')
@@ -183,6 +223,24 @@ class News:
                     payload=client.get(f'https://data.sec.gov/submissions/CIK{cik:010}.json')
                     seen=datetime.now(timezone.utc)
                     events=events_from(payload,symbol,cik,seen)
+                    for event in events:
+                        with self.lock:
+                            old=self.db.execute('SELECT body FROM events WHERE id=?',(f'{symbol}:{event["accession"]}',)).fetchone()
+                            enabled=self.config['enabled'] and self.config.get('documents',False)
+                        if old:event=json.loads(old[0])
+                        if enabled and document_budget and not event.get('document_status'):
+                            document_budget-=1
+                            try:
+                                content=client.document(event['source_url'])
+                                event['document']=document_evidence(content,datetime.now(timezone.utc).isoformat())
+                                event['document_status']='retrieved'
+                            except (ValueError,OSError):event['document_status']='unavailable; metadata retained'
+                            if old:
+                                with self.lock,self.db:self.db.execute('UPDATE events SET body=? WHERE id=?',(json.dumps(event,allow_nan=False),f'{symbol}:{event["accession"]}'))
+                        if not old:
+                            # Update the list entry used by the insertion below.
+                            for item in events:
+                                if item['accession']==event['accession']:item.update(event)
                     with self.lock, self.db:
                         for event in events:
                             event['context']={'role':'held' if symbol in account.get('positions',{}) else 'candidate',
@@ -192,7 +250,7 @@ class News:
                             # Preserve the first received evidence and classification forever.
                             self.db.execute('INSERT OR IGNORE INTO events VALUES (?,?)',
                                 (f'{symbol}:{event["accession"]}',json.dumps(event,allow_nan=False)))
-                    coverage.append({'symbol':symbol,'status':f'Checked; {len(events)} relevant filings in 7-day window'})
+                    coverage.append({'symbol':symbol,'checked_at':seen.isoformat(),'status':f'Checked; {len(events)} relevant filings in 7-day window'})
                 with self.lock:
                     if self.config['enabled']:
                         self.info['last_success']=datetime.now(timezone.utc).isoformat()

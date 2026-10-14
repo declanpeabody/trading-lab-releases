@@ -102,7 +102,7 @@ class JournalTests(unittest.TestCase):
         self.record(date(2023,3,1));state=Journal(self.tmp.name).state()
         self.assertEqual(state['total'],30)
         a=next(r for r in state['records'] if r['symbol']=='AAPL')
-        self.assertEqual(a['reason'],'Outside top six unheld candidates')
+        self.assertEqual(a['reason'],'Outside this cycle’s candidate quote allocation')
         self.assertIsNone(a['quote_usd']);self.assertTrue(a['features']['eligible'])
         self.assertEqual(a['outcomes'],{})
     def test_outcomes_arrive_only_after_completed_future_bars(self):

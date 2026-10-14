@@ -17,13 +17,21 @@ BATCH = 6
 LEGACY = {s: 'NASDAQ' for s in ('AAPL', 'MSFT', 'AMZN')}
 
 
+def common_stock_candidate(symbol, name=''):
+    # Reject explicit security suffixes/names, not every five-letter ticker.
+    # A ticker alone cannot prove instrument identity; provider type still applies.
+    if re.search(r'(?:[.-](?:WT|WS|W|UN|U|RT|R)|[.-]P(?:R)?[.-]?[A-Z]*)$',symbol):return False
+    return not re.search(r'\b(warrants?|preferred|depositary shares|rights|units)\b',name,re.I)
+
+
 def catalogue(rows):
     found, ambiguous = {}, set()
     for row in rows:
         symbol, exchange = row.get('symbol', ''), row.get('exchange')
         if (row.get('country') != 'United States' or row.get('currency') != 'USD'
                 or row.get('type') != 'Common Stock' or exchange not in ('NASDAQ', 'NYSE')
-                or not re.fullmatch(r'[A-Z0-9][A-Z0-9.\-]{0,14}', symbol)):
+                or not re.fullmatch(r'[A-Z0-9][A-Z0-9.\-]{0,14}', symbol)
+                or not common_stock_candidate(symbol,str(row.get('name','')))):
             continue
         if symbol in found and found[symbol] != exchange:
             ambiguous.add(symbol)

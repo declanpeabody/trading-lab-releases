@@ -179,9 +179,12 @@ class Ledger:
             else:p['basis_reference']=reference
         return blocked
 
+    def valid_purchase_limit(self,value):
+        return type(value) in (int,float) and value in (100,150,200)
+
     def cycle(self, prices, histories, fx, date, stamp, symbols=None, history_rows=None, purchase_limit=MAX_POSITION):
         # Validate the complete snapshot before touching cash or holdings.
-        if type(purchase_limit) not in (int,float) or purchase_limit not in (100,150,200):
+        if not self.valid_purchase_limit(purchase_limit):
             raise ValueError('Purchase setting must be £100, £150 or £200; safety cap is fixed')
         fx = positive(fx)
         symbols = tuple(SYMBOLS if symbols is None else symbols)

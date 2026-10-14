@@ -15,7 +15,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 from engine import Ledger
 from market import Market, session_window, validate_key, MarketUnavailable, ApiBudget, ConnectionTest
-from research import Research, Experiments
+from research import Research, Experiments, ShadowTrials
 from ranked_scanner import RankedScanner, Journal
 from news import News
 from updater import Updates
@@ -34,12 +34,35 @@ def worker_health(thread):
                    'Trading worker overdue; check the Mac service.' if overdue else info['message'])}
 
 
+def persist_worker():
+    """Bounded progress snapshot; a timestamp is not proof of a live process."""
+    path=Path(os.getenv('DATA_DIR','/data'))/'worker-status.json'
+    try:
+        tmp=path.with_suffix('.tmp')
+        tmp.write_text(json.dumps(WORKER|{'pid':os.getpid(),'recorded_at':time.time()}))
+        tmp.chmod(0o600);tmp.replace(path)
+    except OSError:pass  # Existing health endpoint remains available on disk failure.
+
+
+def saved_worker(directory,now=None):
+    now=time.time() if now is None else now
+    try:
+        data=json.loads((Path(directory)/'worker-status.json').read_text())
+        age=now-float(data['recorded_at']);due=float(data['due'])
+        if age<0 or not 0<due<now+86400:raise ValueError()
+        return {'state':data['state'],'recorded_at':data['recorded_at'],
+                'next_check_epoch':due,'seconds_since_progress':age,
+                'overdue':now>due+900,'note':'Saved progress only; not a process liveness probe.'}
+    except (OSError,ValueError,KeyError,TypeError):return {'state':'unknown','note':'No valid saved worker progress available.'}
+
+
 def worker(ledger):
     global WORKER
     scanner=None
     while not STOP.is_set():
         delay=900
         WORKER={'state':'checking','message':'Checking worker and account','heartbeat':time.time(),'due':time.time()}
+        persist_worker()
         try:
             if scanner is None:
                 directory=os.getenv('DATA_DIR','/data')
@@ -56,6 +79,7 @@ def worker(ledger):
             WORKER={'state':'failed','message':message,'heartbeat':time.time(),'due':time.time()+delay}
             try:ledger.fail(message)
             except Exception:pass  # Health remains available in memory even when disk is full.
+        persist_worker()
         STOP.wait(delay)
 
 
@@ -143,6 +167,8 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
                 except (OSError,sqlite3.Error):state['request_budget']={'error':'Local request counter unavailable; check storage. No allowance estimate is available.'}
                 state['no_trade']=no_trade_reasons(state)
                 self.respond(200, json.dumps(state, allow_nan=False))
+            elif self.path == '/api/trials':
+                self.respond(200,json.dumps(ShadowTrials(os.getenv('DATA_DIR','/data')).state(),allow_nan=False))
             elif self.path in ('/api/experiments','/api/experiments/export') and experiments:
                 extra={'Content-Disposition':'attachment; filename="strategy-experiments.json"'} if self.path.endswith('/export') else None
                 self.respond(200,json.dumps(experiments.state(),allow_nan=False),extra=extra)
@@ -177,7 +203,7 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
 
         def do_POST(self):
             if not self.authorized(): return
-            if self.path not in ('/api/control', '/api/research', '/api/news', '/api/updates', '/api/experiments', '/api/connection-test', '/api/monitoring'):
+            if self.path not in ('/api/control', '/api/research', '/api/news', '/api/updates', '/api/experiments', '/api/connection-test', '/api/monitoring', '/api/trials'):
                 self.respond(404, '{"error":"Not found"}')
                 return
             if not hmac.compare_digest(self.headers.get('X-CSRF-Token',''),csrf):
@@ -196,6 +222,8 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
                     experiments.control(payload['action'],payload.get('enabled'))
                 elif self.path == '/api/research' and research:
                     research.start(payload)
+                elif self.path == '/api/trials':
+                    ShadowTrials(os.getenv('DATA_DIR','/data')).control(payload.get('action'),payload.get('enabled'))
                 elif self.path == '/api/news' and news:
                     news.configure(payload)
                 elif self.path == '/api/updates' and updates:
@@ -297,15 +325,32 @@ def monitoring_status(directory):
         item.update(symbol=symbol,latest_price_usd=mark,value_gbp=value,unrealised_gbp=profit,
             unrealised_pct=profit/cost*100 if profit is not None else None,reconciliation_required=bool(p.get('reconciliation')))
         positions.append(item)
+    result['worker_progress']=saved_worker(directory)
     result['positions']=positions
     scan=state.get('scanner',{})
-    result['scanner']={key:scan.get(key) for key in ('updated_at','decision_at','target_count','universe_count','histories_ready','ranked_histories','histories_pending','selected','checked','decision_state','quote_failures','history_failures')}
+    result['scanner']={key:scan.get(key) for key in ('updated_at','decision_at','target_count','universe_count','histories_ready','ranked_histories','histories_pending','selected','checked','decision_state','quote_failures','history_failures','holdings_checked_at','optional_error','quote_wait_seconds')}
     try:
         with closing(monitor_db(directory,'api_budget.sqlite3')) as db:
             used=db.execute('SELECT n FROM usage WHERE day=?',(now.date().isoformat(),)).fetchone()
         used=used[0] if used else 0
         result['local_budget']={'used_today':used,'normal_remaining':max(0,500-used),'total_remaining':max(0,700-used),'reset_timezone':'UTC'}
     except sqlite3.Error:result['local_budget']=None
+    try:
+        with closing(monitor_db(Path(directory)/'news','events.sqlite3')) as db:
+            meta=db.execute('SELECT body FROM meta WHERE id=1').fetchone()
+            events=db.execute("SELECT body FROM events ORDER BY rowid DESC LIMIT 12").fetchall()
+        info=json.loads(meta[0]) if meta else {}
+        result['news']={k:info.get(k) for k in ('last_attempt','last_success','error','coverage')}
+        result['news']['recent_events']=[{k:e.get(k) for k in ('symbol','form','first_seen','categories','flag','document_status')} for e in (json.loads(row[0]) for row in events)]
+        result['news']['mode']='SEC observations only; active trading ignores news'
+    except (sqlite3.Error,OSError,ValueError):result['news']={'mode':'News diagnostics unavailable'}
+    try:
+        from research import experiment_metrics
+        with closing(monitor_db(directory,'shadow-trials.sqlite3')) as db:
+            trial=json.loads(db.execute('SELECT body FROM trials WHERE id=1').fetchone()[0])
+        result['comparisons']={k:trial.get(k) for k in ('enabled','started','last','checks','misses','message','invalid')}
+        result['comparisons']['metrics']={k:experiment_metrics(b,[],trial['closes'][k]) for k,b in trial['books'].items()}
+    except (sqlite3.Error,OSError,ValueError,KeyError,TypeError):result['comparisons']=None
     return monitor_redact(result,directory)
 
 
@@ -328,7 +373,7 @@ def monitoring_decisions(directory,arguments,trades=False):
         rows=db.execute('SELECT body FROM decisions'+clause+' ORDER BY at DESC,rowid DESC LIMIT ?',(*params,limit+1)).fetchall()
     records=[]
     for row in rows[:limit]:
-        data=json.loads(row[0]);records.append({key:data.get(key) for key in ('at','day','symbol','action','reason','quote_usd','purchase_limit','rank','selected','held_before')})
+        data=json.loads(row[0]);records.append({key:data.get(key) for key in ('at','day','symbol','action','reason','quote_usd','purchase_limit','rank','selected','held_before','features','coverage','news_basis')})
     return monitor_redact({'records':records,'limit':limit,'more_available':len(rows)>limit,'day':day,'day_timezone':'America/New_York',
         'note':'Decision journal retention is 90 days / 250,000 observations. Trade records identify actions and decision quotes, not a full broker execution statement.'},directory)
 
