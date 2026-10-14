@@ -77,3 +77,20 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertTrue(any('does not block all entries' in r for r in result['reasons']))
         self.assertEqual(result['decisions'][0]['reason'],'No entry signal')
         self.assertEqual(state['error'],'old failure')
+
+
+class QuoteValidationTests(unittest.TestCase):
+    def test_reasons_are_specific_and_do_not_echo_bad_field_values(self):
+        from engine import quote
+        base=dict(symbol='MSFT',currency='USD',timestamp=1000,close=100,is_market_open=True)
+        for changes,reason in [({'timestamp':'PRIVATE-SECRET'},'timestamp is missing'),
+                ({'close':'PRIVATE-SECRET'},'price is missing'),({'timestamp':800},'200.0 seconds old'),
+                ({'timestamp':1010},'10.0 seconds ahead'),({'currency':'PRIVATE-SECRET'},'currency mismatch'),
+                ({'is_market_open':False},'Market is closed')]:
+            with self.subTest(reason=reason):
+                with self.assertRaises(ValueError) as error:quote(base|changes,'MSFT',1000,'USD')
+                self.assertIn(reason,str(error.exception));self.assertNotIn('PRIVATE-SECRET',str(error.exception))
+        self.assertEqual(quote(base,'MSFT',1120,'USD'),100)
+        self.assertEqual(quote(base,'MSFT',995,'USD'),100)
+        for now in (1120.01,994.99):
+            with self.assertRaises(ValueError):quote(base,'MSFT',now,'USD')

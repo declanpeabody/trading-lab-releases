@@ -1,27 +1,18 @@
-# 2026.10.13.5 — Connection diagnostics and data scheduling
+# 2026.10.14.1 — Held-quote timing and validation diagnostics
 
-- Overview now includes an authenticated, CSRF-protected Test data connection button.
-  It performs at most one AAPL daily-history request, including outside market
-  hours, using the normal budget and existing outage cooldown. Repeated clicks
-  are limited to one test per minute. Results are timestamped and separate from
-  the trading ledger; successful history access does not prove quote/catalogue
-  access or clear a previous account error. Diagnostic state resets on restart.
-- Why no trade? lists current controls, the last recorded data error, history
-  coverage and per-stock decisions from the latest check. Partial coverage is
-  correctly distinguished from a total block. Old scan results remain dated.
-- History downloads preserve seven normal requests per remaining 15-minute
-  weekday session slot for candidate checks. Deferred histories remain pending
-  and retain their cursor rather than being labelled unavailable.
-- The synthetic scanner replay applies the same history reservation rule.
-- Research downloads are rejected during the weekday regular-hours window and
-  capped at 50 attempts per UTC day within the existing shared 500 normal/700
-  total limits. Run research again later to use its retained downloads; research
-  is not automatically queued. Held-position credits remain exclusive to active
-  holdings. No provider subscription or quota is changed.
-- Overview shows local usage, remaining normal/total requests, estimated candidate
-  reserve, history allowance and local UTC reset time. Other apps using the key
-  are not counted, and coverage is not guaranteed. Exchange holidays/early closes
-  are still checked through quote flags; reservations use a weekday clock.
+Fetch the existing candidate quote batch before active holdings, with USD/GBP
+last. This reduces the wait between receiving held-stock quotes and validating
+all prices at the decision timestamp. The same request caps, priority credits,
+120-second maximum age and 5-second future tolerance remain enforced. No extra
+requests, cached-price substitutions, or immediate retries are introduced.
 
-Paper balance, positions, £200 purchase ceiling, trading rules and experiment
-promotion requirements are preserved. No real-money execution exists.
+Held-quote errors now state the validation reason: stale/future timestamp,
+missing/invalid timestamp or price, currency/symbol/exchange mismatch, closed
+market or extended hours. Age failures show derived seconds; failed validations
+also report seconds since receipt. Quote failures appear in scanner notes, and
+FX failures identify USD/GBP. Provider bodies and unvalidated field values are
+not included. Invalid holdings or FX still block the complete account cycle.
+
+This addresses a demonstrated collection-order risk, not a confirmed diagnosis
+of the user's MSFT response. The next check will identify any remaining provider
+or timing issue. The update preserves holdings, paper funds and experiment rules.

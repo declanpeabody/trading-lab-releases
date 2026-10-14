@@ -79,6 +79,37 @@ class UniverseTests(unittest.TestCase):
         self.scan();self.scan()
         self.assertTrue(any(d['action']=='BUY' for d in self.scanner.status['decisions']))
 
+    def test_held_quotes_are_collected_last_without_extra_requests(self):
+        self.scan();self.scan();held=set(self.ledger.read()['positions'])
+        self.assertEqual(len(held),5)
+        self.market.calls=[];original=self.market.get;clock=[1000000.0]
+        def delayed(endpoint,**params):
+            result=original(endpoint,**params);clock[0]+=8
+            if endpoint=='quote':result['timestamp']=clock[0]-50
+            return result
+        with patch.object(self.market,'get',side_effect=delayed),patch.object(self.scanner,'timestamp',side_effect=lambda:clock[0]):self.scan()
+        calls=[(symbol,priority) for endpoint,symbol,priority in self.market.calls if endpoint=='quote']
+        self.assertLessEqual(len(calls),12)
+        self.assertEqual(calls[-1],('USD/GBP',True))
+        self.assertEqual(set(s for s,_ in calls[-6:-1]),held)
+        self.assertTrue(all(priority for _,priority in calls[-6:]))
+        self.assertTrue(held.issubset(self.scanner.status['checked']))
+        self.assertIsNone(self.ledger.read()['error'])
+        self.assertEqual({d['symbol'] for d in self.scanner.audit['decisions'][:5]},held)
+
+    def test_stale_held_quote_reports_age_and_wait_without_mutating_account(self):
+        self.scan();self.scan();held=next(iter(self.ledger.read()['positions']))
+        before=self.ledger.read();original=self.market.get;clock=[1000000.0]
+        def stale(endpoint,**params):
+            result=original(endpoint,**params);clock[0]+=8
+            if endpoint=='quote':result['timestamp']=clock[0]-(150 if params['symbol']==held else 0)
+            return result
+        with patch.object(self.market,'get',side_effect=stale),patch.object(self.scanner,'timestamp',side_effect=lambda:clock[0]):
+            with self.assertRaisesRegex(ValueError,'maximum 120 seconds.*waited'):self.scan()
+        self.assertEqual(self.ledger.read(),before)
+        self.assertIn(held,self.scanner.status['quote_failures'])
+        self.assertEqual(self.scanner.audit['decisions'],[])
+
     def test_day_rollover_defers_ranking_then_reuses_provider_verified_unchanged_grid(self):
         self.ledger.control('block');self.scan();cursor=self.scanner.state['screen_cursor']
         self.market.calls=[];self.scan(NOW+timedelta(days=3))

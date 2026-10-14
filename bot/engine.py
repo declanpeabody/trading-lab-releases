@@ -22,16 +22,23 @@ def positive(value):
 
 
 def quote(data, symbol, now, currency=None):
+    # Only static validation text and finite derived ages may leave this function.
+    # Do not expose provider field values (or float conversion exception text).
+    if not isinstance(data,dict):raise ValueError('Quote response is not an object')
     if data.get('symbol') != symbol:
         raise ValueError('Quote symbol mismatch')
     if currency and data.get('currency') != currency:
         raise ValueError('Quote currency mismatch')
-    stamp = positive(data.get('last_quote_at') or data.get('timestamp', 0))
-    if not -5 <= now - stamp <= 120:
-        raise ValueError('Quote older than two minutes or timestamp in future')
+    try:stamp=positive(data.get('last_quote_at') or data.get('timestamp',0))
+    except (ValueError,TypeError,OverflowError):raise ValueError('Quote timestamp is missing, invalid or non-positive') from None
+    age=now-stamp
+    if not math.isfinite(age):raise ValueError('Quote age is invalid')
+    if age>120:raise ValueError(f'Quote older than two minutes: {age:.1f} seconds old at validation (maximum 120 seconds)')
+    if age< -5:raise ValueError(f'Quote timestamp in future: {-age:.1f} seconds ahead (maximum 5 seconds)')
     if data.get('is_market_open') is not True:
         raise ValueError('Market is closed or its status is unavailable')
-    return positive(data['close'])
+    try:return positive(data.get('close'))
+    except (ValueError,TypeError,OverflowError):raise ValueError('Quote price is missing, invalid or non-positive') from None
 
 
 def history(data, symbol, today):

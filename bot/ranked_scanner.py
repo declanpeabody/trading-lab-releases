@@ -139,28 +139,44 @@ class RankedScanner(Scanner):
         if len(ready)<len(universe):notes.append('Partial ranking: only ready stocks are eligible; the rest wait for valid history.')
         self.audit['bars']=dict(bars)
         self.audit['at']=self.now('UTC').isoformat()
-        raw={}
-        for symbol in held+requested:
+        raw={};received={}
+        # Candidates first: active holdings are collected nearest to the common
+        # decision timestamp. No extra requests or relaxed age limits.
+        for symbol in requested+held:
             try:
                 q=self.market.get('quote',priority=symbol in held,symbol=symbol,exchange=mapping[symbol],prepost='false')
-                if q.get('exchange')!=mapping[symbol]:raise ValueError('Quote exchange mismatch')
-                raw[symbol]=q
+                if not isinstance(q,dict) or q.get('exchange')!=mapping[symbol]:
+                    message='Quote response is not an object' if not isinstance(q,dict) else 'Quote exchange mismatch'
+                    self.status.setdefault('quote_failures',{})[symbol]=message
+                    raise ValueError(message)
+                raw[symbol]=q;received[symbol]=self.timestamp()
             except MarketUnavailable:raise
             except (ValueError,KeyError,TypeError) as exc:
-                if symbol in held:raise ValueError(f'Held stock {symbol}: quote unavailable; decisions blocked this cycle.') from None
+                if symbol in held:
+                    reason=self.status.get('quote_failures',{}).get(symbol,'Quote request failed; see request budget and connection status')
+                    raise ValueError(f'Held stock {symbol}: {reason}; decisions blocked this cycle.') from None
                 notes.append(f'{symbol}: {exc}')
         if raw:
             fxdata=self.market.get('quote',priority=bool(held),symbol='USD/GBP');stamp=self.timestamp();prices={}
-            for symbol,q in raw.items():
+            # Preserve held-first decision order (exits before candidate entries).
+            for symbol in held+requested:
+                if symbol not in raw:continue
+                q=raw[symbol]
                 try:
                     p=quote(q,symbol,stamp,'USD')
                     if q.get('is_extended_hours') is True:raise ValueError('Extended hours disabled')
                     if symbol not in held and symbol not in experiment_held and p<1:raise ValueError('Price below $1')
                     prices[symbol]=p
                 except (ValueError,KeyError,TypeError) as exc:
-                    if symbol in held:raise ValueError(f'Held stock {symbol}: invalid quote; decisions blocked this cycle.') from None
-                    notes.append(f'{symbol}: {exc}')
-            fx=quote(fxdata,'USD/GBP',stamp)
+                    reason=str(exc) if isinstance(exc,ValueError) else 'Quote response fields are missing or invalid'
+                    reason+=f'; waited {max(0,stamp-received[symbol]):.1f} seconds after receipt before validation'
+                    self.status.setdefault('quote_failures',{})[symbol]=reason
+                    if symbol in held:raise ValueError(f'Held stock {symbol}: {reason}; decisions blocked this cycle.') from None
+                    notes.append(f'{symbol}: {reason}')
+            try:fx=quote(fxdata,'USD/GBP',stamp)
+            except ValueError as exc:
+                self.status.setdefault('quote_failures',{})['USD/GBP']=str(exc)
+                raise ValueError('USD/GBP conversion quote: '+str(exc)+'; decisions blocked this cycle.') from None
             if not session_window(self.now('America/New_York')):raise ValueError('Session ended; no decisions this cycle.')
             self.audit['prices']=prices;self.status['checked']=list(prices)
             if prices:
