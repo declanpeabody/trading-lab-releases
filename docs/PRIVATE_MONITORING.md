@@ -65,3 +65,13 @@ account state, no market calls, redaction, date/limit validation, missing storag
 protocol discovery/initialization, bounded request framing, and launching stdio
 without starting the dashboard. HTTP tests cover the local CSRF-protected toggle.
 No iMac or end-to-end ChatGPT tunnel test has occurred yet.
+
+## Optional login startup (next draft update)
+
+After installing this batch, open Mac setup and choose **9**. Stop any manually running tunnel first with Control-C. Provide the path to your official OpenAI tunnel-client, your existing tunnel ID, and the runtime key at the hidden prompt. The setup copies the client into the installed application directory and creates a separate per-user launch agent. It uses a separate `trading-bot-login` profile; the earlier manual profile is retained.
+
+The key is stored at `private-monitor/runtime-key` under the installed application directory with owner-only file permissions and a private parent directory. This is **not encrypted Keychain storage**. The profile contains only a file reference; neither launch arguments nor the launch-agent plist contain the key. Keep backups private and revoke a compromised key with OpenAI.
+
+Check `http://127.0.0.1:8080/ui` for Ready status, enable local read-only sharing, and verify a real status read. Registration alone does not verify network authentication. Keep the iMac awake; this is login startup, not operation during sleep. **Option 10** stops this launch agent, removes its plist and saved runtime key, and leaves the trading service unchanged. Disable sharing in the dashboard to revoke monitor reads immediately, including any separately running manual tunnel. After a bot update, the stdio process may need a tunnel restart to load the updated monitor code.
+
+Automated tests check configuration and secret handling. Actual macOS launch-agent startup, reboot, sleep/wake and revocation still require verification on the iMac.
