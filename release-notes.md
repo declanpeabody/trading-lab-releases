@@ -1,18 +1,16 @@
-# 2026.10.14.1 — Held-quote timing and validation diagnostics
+# 2026.10.14.2 — Position prices and unrealised returns
 
-Fetch the existing candidate quote batch before active holdings, with USD/GBP
-last. This reduces the wait between receiving held-stock quotes and validating
-all prices at the decision timestamp. The same request caps, priority credits,
-120-second maximum age and 5-second future tolerance remain enforced. No extra
-requests, cached-price substitutions, or immediate retries are introduced.
+Positions now shows shares, simulated purchase price and latest recorded price
+in USD, USD price change and percentage, invested GBP cost, GBP position value,
+and unrealised GBP return with percentage. Positive/negative changes use explicit
+signs and green/red colouring. A total summarises open holdings only, excluding
+cash and previously closed trades. The table scrolls horizontally on phones.
 
-Held-quote errors now state the validation reason: stale/future timestamp,
-missing/invalid timestamp or price, currency/symbol/exchange mismatch, closed
-market or extended hours. Age failures show derived seconds; failed validations
-also report seconds since receipt. Quote failures appear in scanner notes, and
-FX failures identify USD/GBP. Provider bodies and unvalidated field values are
-not included. Invalid holdings or FX still block the complete account cycle.
+GBP return uses the stored cost basis, including simulated purchase costs, and
+the most recent account FX rate. It therefore differs from USD share-price
+performance and does not include future selling costs. Confirmed stock splits
+adjust entry price as before. Missing data displays placeholders, not invented
+prices or returns. The last successful account-check timestamp and a blocked/
+paused notice make stale values clear. No new market-data requests are made.
 
-This addresses a demonstrated collection-order risk, not a confirmed diagnosis
-of the user's MSFT response. The next check will identify any remaining provider
-or timing issue. The update preserves holdings, paper funds and experiment rules.
+Trading rules, holdings, account history and risk controls are unchanged.
