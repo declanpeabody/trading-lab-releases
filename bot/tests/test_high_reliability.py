@@ -74,7 +74,7 @@ class ReliabilityFixTests(unittest.TestCase):
         return base,stage,backup
     def test_verified_recovery_restores_and_preserves_failed_data(self):
         base,stage,backup=self.prepare_recovery()
-        with patch.object(u.mac_setup,'stop'),patch.object(u.mac_setup,'start'):
+        with patch.object(u.mac_setup,'stop'),patch.object(u.mac_setup,'start',side_effect=lambda:self.assertTrue((base/'data/update_hold').exists())):
             self.assertTrue(u.recover_interrupted(base))
         self.assertEqual((base/'app.py').read_text(),'original app.py');self.assertFalse((base/'data/update_hold').exists())
         self.assertEqual(len(list(backup.glob('failed-data-*/keep.txt'))),1)
@@ -95,7 +95,7 @@ class ReliabilityFixTests(unittest.TestCase):
         with patch.object(u.mac_setup,'stop'),patch.object(u.mac_setup,'start'),patch.object(u.shutil,'copytree',side_effect=OSError('interrupted restore')):
             with self.assertRaises(OSError):u.recover_interrupted(base)
         self.assertFalse((base/'data').exists())
-        with patch.object(u.mac_setup,'stop'),patch.object(u.mac_setup,'start'):
+        with patch.object(u.mac_setup,'stop'),patch.object(u.mac_setup,'start',side_effect=lambda:self.assertTrue((base/'data/update_hold').exists())):
             self.assertTrue(u.recover_interrupted(base))
         self.assertTrue((base/'data/paper.sqlite3').exists())
     def test_hard_process_exit_leaves_recoverable_durable_snapshot(self):

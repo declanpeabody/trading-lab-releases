@@ -43,7 +43,7 @@ def recover_interrupted(base):
         try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError:raise ValueError('An updater is still running; wait for it to finish.') from None
         record=json.loads((root/'transaction.json').read_text())
-        if not isinstance(record,dict) or not isinstance(record.get('stage'),str) or record.get('phase') not in ('backed_up','replacing','verifying','verified','recovering'):
+        if not isinstance(record,dict) or not isinstance(record.get('stage'),str) or record.get('phase') not in ('backed_up','replacing','verifying','verified','recovering','restore_verified'):
             raise ValueError('No valid interrupted transaction record; existing files preserved.')
         if not (base/'data'/'update_hold').exists() and record.get('phase')!='recovering':
             raise ValueError('No interrupted trading hold found. Do not roll back an active account; use option 3 to start the service if needed.')
@@ -62,7 +62,10 @@ def recover_interrupted(base):
         mac_setup.stop()
         durable_record(root/'transaction.json',record|{'phase':'recovering'})
         restore(base,backup)
+        durable_record(base/'data'/'update_hold',{'stage':stage.name,'recovery':True})
         mac_setup.start()
+        durable_record(root/'transaction.json',record|{'phase':'restore_verified'})
+        (base/'data'/'update_hold').unlink(missing_ok=True)
         durable_record(root/'transaction.json',record|{'phase':'recovered'})
         (stage/'RESOLVED').touch(mode=0o600)
         save(root/'status.json',{'available':False,'installing':False,'message':'Interrupted update recovered: verified previous application and account restored.'})
@@ -105,7 +108,11 @@ def transaction(base,source,stage,expected):
             if backup_complete:
                 mac_setup.stop()
                 durable_record(root/'transaction.json',record|{'phase':'recovering'})
-                restore(base,backup);mac_setup.start()
+                restore(base,backup)
+                durable_record(base/'data'/'update_hold',{'stage':stage.name,'recovery':True})
+                mac_setup.start()
+                durable_record(root/'transaction.json',record|{'phase':'restore_verified'})
+                (base/'data'/'update_hold').unlink(missing_ok=True)
                 durable_record(root/'transaction.json',record|{'phase':'recovered'})
                 message='Update failed; previous application and data restored.'
             elif stopped:
