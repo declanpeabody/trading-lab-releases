@@ -195,6 +195,18 @@ class RankedScanner(Scanner):
             self.status['holdings_checked_at']=at
             if ledger.read().get('error'):return
 
+        # Five-holding free-plan profile: protect frequent mandatory checks.
+        # Persist the optional-stage timestamp so restarts do not spend another batch.
+        free_monitoring=expanded and slots==5
+        if free_monitoring:
+            last=self.state.get('optional_checked_at',0)
+            if held and 0<=self.timestamp()-last<1800:
+                self.status['selected']=[]
+                self.status['quote_requested']=[]
+                notes.append('Free-plan monitoring: holdings checked; candidates, comparisons and history preparation run at most every 30 minutes.')
+                return
+            self.state['optional_checked_at']=self.timestamp();self.save()
+
         live=ledger.read()
         needs_entries=(not any(live.get(k) for k in ('paused','buy_block','risk_latched','day_block'))
                        and live['cash']>=1 and len(live['positions'])<slots)
@@ -283,7 +295,7 @@ class RankedScanner(Scanner):
         # Preserve the cursor across days/restarts so quota limits cannot starve the tail.
         cursor=self.state.get('screen_cursor',0);visited=0;batch=[];deadline=self.monotonic()+180
         budget=self.budget or ApiBudget(self.directory);shared_failure=None
-        while universe and visited<len(universe) and len(batch)<HISTORY_BATCH:
+        while universe and visited<len(universe) and len(batch)<(5 if free_monitoring else HISTORY_BATCH):
             if ledger.read()['paused'] or not session_window(self.now('America/New_York')):break
             if self.monotonic()>=deadline:break
             if budget.used()>=500:

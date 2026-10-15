@@ -23,7 +23,7 @@ from version import VERSION
 
 ROOT = Path(__file__).parent
 STOP = threading.Event()
-WORKER = {'state':'starting','message':'Worker starting','heartbeat':time.time(),'due':time.time()+900}
+WORKER = {'state':'starting','message':'Worker starting','heartbeat':time.time(),'due':time.time()+300}
 
 
 def worker_health(thread):
@@ -60,7 +60,7 @@ def worker(ledger):
     global WORKER
     scanner=None
     while not STOP.is_set():
-        delay=900
+        delay=300
         WORKER={'state':'checking','message':'Checking worker and account','heartbeat':time.time(),'due':time.time()}
         persist_worker()
         try:
@@ -446,7 +446,7 @@ def main():
     lock = (directory/'worker.lock').open('w')
     try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError: raise SystemExit('Another worker is already using this data disk.')
-    ledger = Ledger(directory/'paper.sqlite3',initial_cash=10000,max_positions=20,purchase_cap=1000)
+    ledger = Ledger(directory/'paper.sqlite3',initial_cash=10000,max_positions=5,purchase_cap=1000)
     news = optional_news(directory)
     news_thread = threading.Thread(target=news.worker, args=(ledger, STOP), daemon=True)
     news_thread.start()

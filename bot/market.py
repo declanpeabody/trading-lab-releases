@@ -33,14 +33,22 @@ class ApiBudget:
         minutes=max(570,now.hour*60+now.minute)
         return math.ceil((960-minutes)/15)*7
 
+    @staticmethod
+    def monitoring_headroom(now=None):
+        """Reserve five stock quotes + FX per five-minute slot, plus recovery slack."""
+        now=now or datetime.now(ZoneInfo('America/New_York'))
+        if now.weekday()>=5 or now.hour*60+now.minute>=960:return 0
+        minutes=max(570,now.hour*60+now.minute)
+        return math.ceil((960-minutes)/5)*6+30
+
     def state(self):
         used=self.used();now=datetime.now(ZoneInfo('UTC'))
         reset=(now+timedelta(days=1)).replace(hour=0,minute=0,second=0,microsecond=0)
-        headroom=self.history_headroom()
-        return dict(used=used,normal_remaining=max(0,500-used),total_remaining=max(0,700-used),
-            history_available=max(0,500-used-headroom),candidate_reserve=headroom,
+        headroom=self.history_headroom();monitoring=self.monitoring_headroom();normal=max(0,min(500,700-monitoring)-used)
+        return dict(used=used,normal_remaining=normal,total_remaining=max(0,700-used),
+            history_available=max(0,min(normal,500-used-headroom)),candidate_reserve=headroom,monitoring_reserve=monitoring,
             reset_at=reset.isoformat(),research_daily_cap=50,
-            note='Local attempts only; other apps and provider credit weights are not included. History reserves seven requests per remaining 15-minute weekday slot; actual coverage is not guaranteed.')
+            note='Local attempts only; other apps and provider credit weights are not included. Optional requests preserve six requests per remaining five-minute weekday slot plus 30 recovery credits for holdings. Actual coverage is not guaranteed.')
 
     def reserve(self, priority=False, purpose='trading'):
         if purpose not in ('trading','history','research','diagnostic'):raise ValueError('Unknown request purpose')
@@ -55,6 +63,8 @@ class ApiBudget:
             used = row[0] if row else 0
             if used >= (700 if priority else 500):
                 raise ValueError('Local daily API budget reached; candidate scans/research stop at 500, held-position checks at 700. No subscription was changed.')
+            if not priority and used>=700-self.monitoring_headroom():
+                raise BudgetDeferred('Optional requests deferred to preserve remaining five-minute holdings checks and recovery credits.')
             if purpose=='history' and used>=500-self.history_headroom():
                 raise BudgetDeferred('History preparation deferred to preserve credits for later candidate checks.')
             if purpose=='research':

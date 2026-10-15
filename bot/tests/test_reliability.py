@@ -62,7 +62,7 @@ class WorkerTests(unittest.TestCase):
         seen=[];stop.wait.side_effect=lambda delay:seen.append((delay,dict(app.WORKER)))
         with patch.object(app,'STOP',stop),patch.object(app,'RankedScanner',return_value=scanner),patch.object(app,'session_window',return_value=True),patch.dict('os.environ',{'DATA_DIR':'/tmp/nonexistent-trading-test'}):
             app.worker(ledger)
-        self.assertEqual([x[0] for x in seen],[60,900]);self.assertEqual(seen[0][1]['state'],'failed')
+        self.assertEqual([x[0] for x in seen],[60,300]);self.assertEqual(seen[0][1]['state'],'failed')
         self.assertEqual(seen[1][1]['state'],'waiting');self.assertEqual(scanner.cycle.call_count,2)
     def test_construction_failure_is_visible_and_retried(self):
         original=dict(app.WORKER);self.addCleanup(lambda:setattr(app,'WORKER',original))

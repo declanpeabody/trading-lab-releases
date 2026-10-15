@@ -1,3 +1,5 @@
+> Version 2026.10.15.1 active profile: five holdings, £10,000 contributed paper capital, £1,000 purchase cap. Holdings checks wait five minutes after processing. Optional work runs at most every 30 minutes once holdings exist, preparing at most five histories. Free-plan rate and daily ceilings are unchanged; optional requests preserve remaining holdings credits. Older cadence/batch descriptions below describe the legacy research profile, not this active monitoring schedule.
+
 # Mac historical testing upgrade
 
 Existing Mac users: read **START_HERE_MAC.md**, then run the new **Mac_Setup.command** and choose **8 — Upgrade installed bot**. Your existing settings and paper account are preserved. Open **Historical Testing** from the dashboard to compare daily simulated results with buy-and-hold and cash and download performance reports.

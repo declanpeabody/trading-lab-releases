@@ -1,7 +1,11 @@
-# 2026.10.15.1 — Expanded paper account
+# Release 2026.10.15.1 — five-holding free-plan monitoring
 
-At the user's request, the active account now has £10,000 total contributed paper funds, up to 20 open positions, and a fixed £1,000 maximum per purchase. An existing £1,000 account receives exactly £9,000 once on startup. Existing holdings, realised/unrealised profit or loss, history and control flags remain intact; funding is logged separately from profit.
+Pending review/release; not installed automatically.
 
-Research and historical comparison accounts retain their original £1,000/five-slot basis. Their purchase-size promotions no longer change the expanded active account's fixed £1,000 setting. Existing holdings are not automatically topped up. Cash and entry signals still constrain purchases; 20 is a maximum, not a target.
+Adds £9,000 simulated funding once (£10,000 contributed capital), preserves holdings/history/losses and risk controls, and sets a £1,000 purchase cap with FIVE holding slots (supersedes the earlier 20-slot proposal). Existing positions are not topped up or forcibly sold.
 
-No data subscription or request allowance changes. Twenty serial held-stock requests can exceed the 120-second freshness ceiling on the free data plan. The bot still refuses stale/incomplete snapshots; this setting does not guarantee uninterrupted checks of 20 stocks. Paper trading only.
+Worker waits five minutes after processing. Holdings and FX are checked first with the unchanged 120-second freshness ceiling. Once holdings exist, optional candidates, paper comparisons and history preparation run at most every 30 minutes; histories are limited to five per optional batch. Comparisons receive fewer observations. The 300-stock universe warms up more slowly. With no holdings, small history batches may run each cycle to prepare initial entries.
+
+Request spacing remains eight seconds, normal daily ceiling 500, holdings ceiling 700, and research subcap 50 outside regular hours. All optional requests additionally preserve six credits per remaining five-minute regular-session slot plus 30 recovery credits, including before the market opens. These are conservative local estimates, not the provider balance; another app using the key or repeated failures can still exhaust the allowance. No subscription change. Checks take processing time in addition to the five-minute wait.
+
+Legacy research simulations still use their own original capital, capacity and cadence; they do not replay this new monitoring schedule. Paper only. Publication requires explicit release approval.
