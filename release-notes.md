@@ -1,11 +1,7 @@
-# 2026.10.14.6 — Three reliability fixes
+# 2026.10.15.1 — Expanded paper account
 
-Strategy experiment storage is now isolated from held-stock checks. A separate validated purchase setting survives experiment-storage failure. New entries wait while experiment settings are unavailable; fresh-price valuation and exits continue. Damaged experiment data is preserved rather than reset.
+At the user's request, the active account now has £10,000 total contributed paper funds, up to 20 open positions, and a fixed £1,000 maximum per purchase. An existing £1,000 account receives exactly £9,000 once on startup. Existing holdings, realised/unrealised profit or loss, history and control flags remain intact; funding is logged separately from profit.
 
-Unreadable news configuration or storage disables only the optional news component. The dashboard displays the problem and the paper trading service can still start. Existing news files are preserved for repair.
+Research and historical comparison accounts retain their original £1,000/five-slot basis. Their purchase-size promotions no longer change the expanded active account's fixed £1,000 setting. Existing holdings are not automatically topped up. Cash and entry signals still constrain purchases; 20 is a maximum, not a target.
 
-An update hold now shows explicitly in worker health and the dashboard. Process liveness is separate from trading readiness so installation can verify a deliberately held service. Future updates record durable phases and backup hashes. Mac setup option 11 validates a complete backup and account database before restoring an interrupted update; interrupted data is retained. It refuses incomplete or altered backups and cannot silently roll back an active account.
-
-Recovery requires a verified transaction record from this updater. Older interrupted installations without that record need manual review; never delete the hold file to bypass recovery. Native macOS launchd behavior still requires local verification.
-
-Paper trading only. Existing balances, positions, controls and history are preserved. This release addresses the three high-severity reliability findings; atomic execution journaling, redirect hardening and SEC document retries remain separate work.
+No data subscription or request allowance changes. Twenty serial held-stock requests can exceed the 120-second freshness ceiling on the free data plan. The bot still refuses stale/incomplete snapshots; this setting does not guarantee uninterrupted checks of 20 stocks. Paper trading only.

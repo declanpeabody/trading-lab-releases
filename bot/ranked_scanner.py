@@ -153,7 +153,9 @@ class RankedScanner(Scanner):
         self.audit['bars']=dict(bars)
         self.audit['at']=self.now('UTC').isoformat()
         raw={};received={};prices={};fxdata=None;fx=None
-        limit=self.experiments.active_limit() if self.experiments else 200
+        slots=getattr(ledger,'max_positions',5)
+        expanded=getattr(ledger,'purchase_cap',200)==1000
+        limit=1000 if expanded else self.experiments.active_limit() if self.experiments else 200
         self.status['active_purchase_limit']=limit
 
         def fetch(symbol,priority=False):
@@ -195,13 +197,13 @@ class RankedScanner(Scanner):
 
         live=ledger.read()
         needs_entries=(not any(live.get(k) for k in ('paused','buy_block','risk_latched','day_block'))
-                       and live['cash']>=1 and len(live['positions'])<5)
+                       and live['cash']>=1 and len(live['positions'])<slots)
         experiments_need=(self.experiments and self.experiments.state()['enabled']) or self.trial_call('state')['enabled']
         if not needs_entries and not experiments_need:
             requested=[]
             notes.append('Candidate quotes deferred: no active entry capacity and experiments disabled.')
         elif not experiments_need:
-            requested=selected=selected[:min(6,5-len(live['positions'])+1)]
+            requested=selected=selected[:min(6,slots-len(live['positions'])+1)]
         if getattr(self.experiments,'error',None):
             needs_entries=False;requested=[]
             self.status['optional_error']=self.experiments.error
@@ -246,7 +248,7 @@ class RankedScanner(Scanner):
                     self.audit['prices'].update(prices);self.status['checked']=list(self.audit['prices'])
                     if self.experiments and not ledger.read().get('error') and not ledger.read()['paused']:
                         self.experiments.observe(prices,bars,fx,today,at,entry_symbols,buy_block=live['buy_block'])
-                        self.experiments.promote(ledger,today)
+                        if not expanded:self.experiments.promote(ledger,today)
                     self.trial_call('observe',prices,bars,fx,today,at,entry_symbols,buy_block=live['buy_block'])
                 else:
                     self.trial_call('miss','Quotes expired during optional checks; all trial books held')
@@ -367,7 +369,7 @@ class Journal:
                 elif not status.get('ranking_complete') and not status.get('partial_ranking_allowed'):action,reason='SKIP','Incomplete watchlist coverage'
                 elif not features['eligible']:action,reason='SKIP','; '.join(features['reasons'])
                 elif symbol not in selected:action,reason='SKIP','Outside this cycle’s candidate quote allocation'
-                elif not status.get('quote_requested',selected) and len(audit['before'].get('positions',{}))>=5:action,reason='SKIP','Five-position limit; optional quote not requested'
+                elif not status.get('quote_requested',selected) and len(audit['before'].get('positions',{}))>=audit['before'].get('account_limits',{}).get('max_positions',5):action,reason='SKIP','Position limit; optional quote not requested'
                 elif symbol not in prices:action,reason='SKIP','Fresh valid quote unavailable'
                 else:action,reason='NOT_EVALUATED','Account paused or cycle not completed'
                 body=dict(scan_id=scan,at=stamp,day=day,symbol=symbol,strategy_version=status.get("version",VERSION),

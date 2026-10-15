@@ -105,7 +105,7 @@ def no_trade_reasons(state):
     for key,message in [('buy_block','New buys are blocked by your control.'),('risk_latched','Total drawdown buying lock is active.'),('day_block','Daily drawdown buying block is recorded; it is reassessed on the next successful session check.')]:
         if state.get(key):reasons.append(message)
     if any(p.get('reconciliation') for p in state.get('positions',{}).values()):reasons.append('Corporate-action verification is required before account decisions resume.')
-    if len(state.get('positions',{}))>=5:reasons.append('All five position slots are occupied.')
+    if len(state.get('positions',{}))>=state.get('account_limits',{}).get('max_positions',5):reasons.append('All configured position slots are occupied.')
     if state.get('cash',0)<=0:reasons.append('No cash is available for new purchases.')
     if not scan:reasons.append('No scanner result has been recorded yet.')
     elif not scan.get('ranked_histories'):reasons.append('Latest decision check had no rankable histories. Prepared histories enter the next check.')
@@ -161,7 +161,7 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
                 state['worker']=worker_health(thread)
                 if experiments:
                     try:
-                        state['active_purchase_limit']=experiments.active_limit()
+                        state['active_purchase_limit']=1000 if state.get('account_limits',{}).get('purchase_cap')==1000 else experiments.active_limit()
                         if getattr(experiments,'error',None):state['experiment_error']=experiments.error
                     except Exception:state['experiment_error']='Experiment settings unavailable; check Strategy Experiments.'
                 state['csrf'] = csrf
@@ -316,7 +316,7 @@ def monitoring_status(directory):
         row=db.execute('SELECT body FROM ledger WHERE id=1').fetchone()
     if not row:raise ValueError('Paper account is not available')
     state=json.loads(row[0]);now=datetime.now(ZoneInfo('UTC'))
-    result={key:state.get(key) for key in ('mode','paused','buy_block','risk_latched','day_block','cash','equity','contributed_capital','fx','last_check','last_success','error')}
+    result={key:state.get(key) for key in ('mode','paused','buy_block','risk_latched','day_block','cash','equity','contributed_capital','account_limits','fx','last_check','last_success','error')}
     result.update(generated_at=now.isoformat(),software_version=VERSION,read_only=True,
         worker_health='Unknown: this is a saved account snapshot, not a live worker health check.',
         valuation_note='Stored prices and FX from the last successful account check; unrealised GBP returns include purchase costs but exclude future selling costs.')
@@ -446,7 +446,7 @@ def main():
     lock = (directory/'worker.lock').open('w')
     try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError: raise SystemExit('Another worker is already using this data disk.')
-    ledger = Ledger(directory/'paper.sqlite3')
+    ledger = Ledger(directory/'paper.sqlite3',initial_cash=10000,max_positions=20,purchase_cap=1000)
     news = optional_news(directory)
     news_thread = threading.Thread(target=news.worker, args=(ledger, STOP), daemon=True)
     news_thread.start()

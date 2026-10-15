@@ -83,7 +83,9 @@ def new_paper_state(initial_cash=PAPER_CAPITAL):
 
 
 class Ledger:
-    def __init__(self, path, initial_cash=PAPER_CAPITAL, price_allowance=PRICE_ALLOWANCE, fx_allowance=FX_ALLOWANCE):
+    def __init__(self, path, initial_cash=PAPER_CAPITAL, price_allowance=PRICE_ALLOWANCE, fx_allowance=FX_ALLOWANCE, max_positions=MAX_OPEN, purchase_cap=MAX_POSITION):
+        if type(max_positions) is not int or not 1<=max_positions<=20 or purchase_cap not in (200,1000):raise ValueError("Invalid paper account limits")
+        self.max_positions=max_positions;self.purchase_cap=purchase_cap
         initial_cash = positive(initial_cash)
         if not all(math.isfinite(x) and 0<=x<=.02 for x in (price_allowance,fx_allowance)):raise ValueError('Invalid cost allowances')
         self.price_allowance=price_allowance;self.fx_allowance=fx_allowance
@@ -104,6 +106,7 @@ class Ledger:
             for field in ('cash', 'equity', 'day_start'):
                 state[field] += addition
             state['contributed_capital'] = funded + addition
+            state['account_limits']={'max_positions':self.max_positions,'purchase_cap':self.purchase_cap}
             self.db.execute('UPDATE ledger SET body=? WHERE id=1', (json.dumps(state,allow_nan=False),))
             if addition:
                 self.db.execute('INSERT INTO events(at,message) VALUES (?,?)',
@@ -180,12 +183,12 @@ class Ledger:
         return blocked
 
     def valid_purchase_limit(self,value):
-        return type(value) in (int,float) and value in (100,150,200)
+        return type(value) in (int,float) and value in (100,150,200,1000) and value<=getattr(self,'purchase_cap',MAX_POSITION)
 
     def cycle(self, prices, histories, fx, date, stamp, symbols=None, history_rows=None, purchase_limit=MAX_POSITION):
         # Validate the complete snapshot before touching cash or holdings.
         if not self.valid_purchase_limit(purchase_limit):
-            raise ValueError('Purchase setting must be £100, £150 or £200; safety cap is fixed')
+            raise ValueError('Purchase setting exceeds the configured paper safety cap')
         fx = positive(fx)
         symbols = tuple(SYMBOLS if symbols is None else symbols)
         if not symbols or len(set(symbols)) != len(symbols):
@@ -232,17 +235,17 @@ class Ledger:
                     s['last_buy'][symbol] = date
                     messages.append(f'PAPER SELL {symbol}: {p["qty"]:.6f} shares, £{proceeds:.2f} proceeds after modelled costs.')
                 elif (not p and signals[symbol] == 'buy' and not s['buy_block']
-                      and len(s['positions']) < MAX_OPEN
+                      and len(s['positions']) < getattr(self,'max_positions',MAX_OPEN)
                       and not s['risk_latched'] and not s['day_block']
                       and s['last_buy'].get(symbol) != date):
                     unit_cost = prices[symbol] * (1+self.price_allowance) * fx * (1+self.fx_allowance)
-                    budget = min(purchase_limit, MAX_POSITION, s['cash'])
+                    budget = min(purchase_limit, getattr(self,'purchase_cap',MAX_POSITION), s['cash'])
                     qty = math.floor(budget / unit_cost * 1_000_000) / 1_000_000
                     cost = qty * unit_cost
                     if qty <= 0 or cost < 1:
                         decisions.append(dict(symbol=symbol,action="SKIP",reason="Insufficient cash / fractional precision"))
                         continue
-                    if cost > min(MAX_POSITION,purchase_limit) + 1e-8 or cost > s['cash'] + 1e-8:
+                    if cost > min(getattr(self,'purchase_cap',MAX_POSITION),purchase_limit) + 1e-8 or cost > s['cash'] + 1e-8:
                         raise ValueError('Budget check failed')
                     action,reason='BUY','Trend entry; controls and budget passed'
                     s['cash'] -= cost
@@ -259,7 +262,7 @@ class Ledger:
                     elif s['risk_latched']:reason='Total drawdown buying lock'
                     elif s['day_block']:reason='Daily drawdown buying block'
                     elif s['last_buy'].get(symbol)==date:reason='Same-day re-entry blocked'
-                    elif len(s['positions'])>=MAX_OPEN:reason='Five-position limit'
+                    elif len(s['positions'])>=getattr(self,'max_positions',MAX_OPEN):reason=('Five-position limit' if getattr(self,'max_positions',MAX_OPEN)==5 else f"{self.max_positions}-position limit")
                 decisions.append(dict(symbol=symbol,action=action,reason=reason))
             s['equity'] = s['cash'] + sum(p['qty'] * prices[k] * fx for k,p in s['positions'].items())
             if s['cash'] < -1e-8:

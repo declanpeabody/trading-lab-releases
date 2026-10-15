@@ -1,9 +1,5 @@
-# Release 2026.10.14.6
+# Release 2026.10.15.1
 
-Declan authorized implementation and publication of the three high-severity reliability fixes on 14 October 2026.
+User confirmed £9,000 additional simulated funding, £10,000 total contributed capital, 20 stock slots and a £1,000 purchase ceiling. Implemented as an explicit active-account profile, separate from legacy research assumptions. Funding is idempotent and preserves holdings, losses and risk flags.
 
-Implemented: isolated strategy experiments with a separate validated active setting; optional news startup fallback; visible update holds, durable transaction phases and integrity-checked local recovery (Mac setup option 11).
-
-Verification includes storage corruption, continued held-stock exits, full service startup with damaged optional stores, explicit held-worker status, altered/incomplete backup rejection, interrupted recovery retry and a subprocess killed during update replacement.
-
-Not included: atomic execution journal, market-data redirect hardening, SEC document retries or strategy changes. No real-money execution.
+Free-plan quote throughput remains a limitation for large portfolios. Freshness protections and provider quotas are unchanged. No real-money or subscription changes.
