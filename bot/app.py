@@ -175,8 +175,12 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
                 state['connection_test']=connection_test.state()
                 try:state['request_budget']=ApiBudget(os.getenv('DATA_DIR','/data')).state()
                 except (OSError,sqlite3.Error):state['request_budget']={'error':'Local request counter unavailable; check storage. No allowance estimate is available.'}
+                try:state['accounting']=ledger.accounting()
+                except (sqlite3.Error,OSError):state['accounting']={'error':'Execution accounting unavailable; no records reconstructed.'}
                 state['no_trade']=no_trade_reasons(state)
                 self.respond(200, json.dumps(state, allow_nan=False))
+            elif self.path == '/api/accounting/export':
+                self.respond(200,json.dumps(ledger.accounting(100000),allow_nan=False),extra={'Content-Disposition':'attachment; filename="paper-executions.json"'})
             elif self.path == '/api/trials':
                 self.respond(200,json.dumps(ShadowTrials(os.getenv('DATA_DIR','/data')).state(),allow_nan=False))
             elif self.path in ('/api/experiments','/api/experiments/export') and experiments:
@@ -381,11 +385,25 @@ def monitoring_decisions(directory,arguments,trades=False):
     clause=' WHERE '+' AND '.join(where) if where else ''
     with closing(monitor_db(directory,'decisions.sqlite3')) as db:
         rows=db.execute('SELECT body FROM decisions'+clause+' ORDER BY at DESC,rowid DESC LIMIT ?',(*params,limit+1)).fetchall()
+    execution_rows=[]
+    if trades:
+        try:
+            with closing(monitor_db(directory,'paper.sqlite3')) as account_db:
+                query="SELECT body FROM executions"+(" WHERE json_extract(body,'$.day')=?" if day else '')+" ORDER BY at DESC,rowid DESC LIMIT ?"
+                execution_rows=[json.loads(r[0]) for r in account_db.execute(query,((day,limit+1) if day else (limit+1,)))]
+        except sqlite3.OperationalError:pass  # Pre-update accounts have no execution table.
     records=[]
     for row in rows[:limit]:
-        data=json.loads(row[0]);records.append({key:data.get(key) for key in ('at','day','symbol','action','reason','quote_usd','purchase_limit','rank','selected','held_before','features','coverage','news_basis')})
-    return monitor_redact({'records':records,'limit':limit,'more_available':len(rows)>limit,'day':day,'day_timezone':'America/New_York',
-        'note':'Decision journal retention is 90 days / 250,000 observations. Trade records identify actions and decision quotes, not a full broker execution statement.'},directory)
+        data=json.loads(row[0]);records.append({key:data.get(key) for key in ('at','day','symbol','action','reason','quote_usd','purchase_limit','rank','selected','held_before','features','coverage','news_basis','execution_id')})
+    if trades:
+        complete={(e['at'],e['symbol'],e['side']):e for e in execution_rows}
+        ids={e['id'] for e in execution_rows}
+        records=[r for r in records if r.get('execution_id') not in ids and (r['at'],r['symbol'],r['action']) not in complete]
+        records.extend(dict(e,action=e['side'],execution_accounting=True) for e in execution_rows)
+        records.sort(key=lambda r:(r['at'],r['symbol']),reverse=True)
+    more=len(records)>limit or len(rows)>limit
+    return monitor_redact({'records':records[:limit],'limit':limit,'more_available':more,'day':day,'day_timezone':'America/New_York',
+        'note':'Decision journal retention is 90 days / 250,000 observations. New execution_accounting records contain atomic simulated fills and costs; older decision-only records remain incomplete. These are not broker statements.'},directory)
 
 
 def monitoring_rpc(message,directory):
