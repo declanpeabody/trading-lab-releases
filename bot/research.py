@@ -366,7 +366,7 @@ class Experiments:
 
 class ShadowTrials:
     """Prospective, opt-in comparisons. No promotion or active-ledger reference."""
-    NAMES=('baseline','allocation','filing_guard')
+    NAMES=('baseline','allocation','filing_guard','concentration','confirmed_entry')
     def __init__(self,directory):
         import sqlite3
         self.directory=Path(directory);self.path=self.directory/'shadow-trials.sqlite3'
@@ -375,6 +375,10 @@ class ShadowTrials:
             db.execute('CREATE TABLE IF NOT EXISTS trials(id INTEGER PRIMARY KEY,body TEXT NOT NULL)')
             db.execute('INSERT OR IGNORE INTO trials VALUES(1,?)',(json.dumps(self.initial()),))
         self.path.chmod(0o600)
+        def migrate(s):
+            if set(s['books'])!=set(self.NAMES):
+                s.update(enabled=False,invalid=True,message='New comparison models require a restart; previous books retained until you explicitly restart.')
+        self.change(migrate)
     @classmethod
     def initial(cls):
         from engine import new_paper_state
@@ -391,7 +395,7 @@ class ShadowTrials:
         import sqlite3
         with sqlite3.connect(self.path) as db:s=json.loads(db.execute('SELECT body FROM trials WHERE id=1').fetchone()[0])
         return s|{'metrics':{k:experiment_metrics(b,[],s['closes'][k]) for k,b in s['books'].items()},
-            'note':'Prospective shared-data paper comparisons, never promoted automatically. Baseline: £200 cap. Allocation: £5 modelled price-risk budget, £150 cap, £200 cash reserve, two new entries per cycle and 0.8 positive correlation filter. Filing guard: £200 cap, requires SEC coverage within one hour and defers entries with a risk-coded filing first seen within seven days. This is not a news sentiment model. No coverage means no filing-guard buy. All accounts freeze together on missing holdings data. Returns include modelled exit costs; gaps can exceed the modelled risk budget. No claim of statistical significance.'}
+            'note':'Prospective shared-data paper comparisons, never promoted automatically. Baseline: £200 cap. Allocation: £5 modelled price-risk budget, £150 cap, £200 cash reserve, two new entries per cycle and 0.8 positive correlation filter. Filing guard: £200 cap, requires SEC coverage within one hour and defers entries with a risk-coded filing first seen within seven days. This is not a news sentiment model. No coverage means no filing-guard buy. All accounts freeze together on missing holdings data. Returns include modelled exit costs; gaps can exceed the modelled risk budget. Concentration: £200 cap, at most two of AAPL/MSFT/AMZN/GOOGL/GOOG/META/NVDA/TSLA plus pairwise correlation ≤0.8; unknown/misaligned histories defer entry. Confirmed entry: buy signal on consecutive complete observations 15–60 minutes apart on the same day, at most two new entries per cycle. Entry filters only; original exits retained. These £1,000/£200 books do not represent the £10,000 active allocation. No claim of statistical significance.'}
     def control(self,action,enabled=None):
         def update(s):
             if action=='enabled' and type(enabled) is bool:
@@ -457,6 +461,22 @@ class ShadowTrials:
                         if len(selected)==2:break
                     cap=min([150]+[5/max(.05,2*assess(bars[x])['volatility_pct']/100) for x in selected])
                     chosen=selected[:max(0,int((body['cash']-200)//cap))]
+                elif name=='concentration':
+                    group={'AAPL','MSFT','AMZN','GOOGL','GOOG','META','NVDA','TSLA'}
+                    allowed=[]
+                    for symbol in chosen:
+                        peers=list(body['positions'])+allowed
+                        if (symbol in group and sum(x in group for x in peers)>=2) or any(self.correlated(symbol,x,bars) for x in peers):
+                            actions.append(dict(model=name,symbol=symbol,action='SKIP',reason='Concentration group cap or correlation >0.8 / unavailable history'));continue
+                        allowed.append(symbol)
+                    chosen=allowed
+                elif name=='confirmed_entry':
+                    previous=s.get('entry_confirmation',{})
+                    elapsed=(datetime.fromisoformat(stamp)-datetime.fromisoformat(previous['at'])).total_seconds() if previous else 0
+                    confirmed=[x for x in chosen if x in previous.get('symbols',[]) and previous.get('day')==day and 900<=elapsed<=3600]
+                    for symbol in chosen:
+                        if symbol not in confirmed[:2]:actions.append(dict(model=name,symbol=symbol,action='SKIP',reason='Waiting for consecutive confirmation or two-entry staging cap'))
+                    chosen=confirmed[:2]
                 elif name=='filing_guard':
                     allowed=[]
                     for symbol in chosen:
@@ -478,6 +498,7 @@ class ShadowTrials:
                 book['experiment_peak']=peak;book['experiment_drawdown']=max(book.get('experiment_drawdown',0),(peak-metric['equity'])/peak*100)
                 updated[name]=(book,sum(d['action']=='SELL' for d in decisions))
                 actions.extend(dict(model=name,**d) for d in decisions)
+            s['entry_confirmation']={'at':stamp,'day':day,'symbols':[x for x in entries if signal(histories[x],prices[x])=='buy']}
             for name,(book,closed) in updated.items():s['books'][name]=book;s['closes'][name]+=closed
             s.update(started=s['started'] or stamp,last=stamp,checks=s['checks']+1,decisions=actions,
                 days=sorted(set(s['days']+[day]))[-252:],message='Collecting prospective evidence; active account unchanged')

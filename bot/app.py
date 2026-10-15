@@ -23,7 +23,7 @@ from version import VERSION
 
 ROOT = Path(__file__).parent
 STOP = threading.Event()
-WORKER = {'state':'starting','message':'Worker starting','heartbeat':time.time(),'due':time.time()+900}
+WORKER = {'state':'starting','message':'Worker starting','heartbeat':time.time(),'due':time.time()+300}
 
 
 def worker_health(thread):
@@ -60,7 +60,7 @@ def worker(ledger):
     global WORKER
     scanner=None
     while not STOP.is_set():
-        delay=900
+        delay=300
         WORKER={'state':'checking','message':'Checking worker and account','heartbeat':time.time(),'due':time.time()}
         persist_worker()
         try:
@@ -105,7 +105,7 @@ def no_trade_reasons(state):
     for key,message in [('buy_block','New buys are blocked by your control.'),('risk_latched','Total drawdown buying lock is active.'),('day_block','Daily drawdown buying block is recorded; it is reassessed on the next successful session check.')]:
         if state.get(key):reasons.append(message)
     if any(p.get('reconciliation') for p in state.get('positions',{}).values()):reasons.append('Corporate-action verification is required before account decisions resume.')
-    if len(state.get('positions',{}))>=5:reasons.append('All five position slots are occupied.')
+    if len(state.get('positions',{}))>=state.get('account_limits',{}).get('max_positions',5):reasons.append('All configured position slots are occupied.')
     if state.get('cash',0)<=0:reasons.append('No cash is available for new purchases.')
     if not scan:reasons.append('No scanner result has been recorded yet.')
     elif not scan.get('ranked_histories'):reasons.append('Latest decision check had no rankable histories. Prepared histories enter the next check.')
@@ -161,7 +161,7 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
                 state['worker']=worker_health(thread)
                 if experiments:
                     try:
-                        state['active_purchase_limit']=experiments.active_limit()
+                        state['active_purchase_limit']=1000 if state.get('account_limits',{}).get('purchase_cap')==1000 else experiments.active_limit()
                         if getattr(experiments,'error',None):state['experiment_error']=experiments.error
                     except Exception:state['experiment_error']='Experiment settings unavailable; check Strategy Experiments.'
                 state['csrf'] = csrf
@@ -175,8 +175,12 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
                 state['connection_test']=connection_test.state()
                 try:state['request_budget']=ApiBudget(os.getenv('DATA_DIR','/data')).state()
                 except (OSError,sqlite3.Error):state['request_budget']={'error':'Local request counter unavailable; check storage. No allowance estimate is available.'}
+                try:state['accounting']=ledger.accounting()
+                except (sqlite3.Error,OSError):state['accounting']={'error':'Execution accounting unavailable; no records reconstructed.'}
                 state['no_trade']=no_trade_reasons(state)
                 self.respond(200, json.dumps(state, allow_nan=False))
+            elif self.path == '/api/accounting/export':
+                self.respond(200,json.dumps(ledger.accounting(100000),allow_nan=False),extra={'Content-Disposition':'attachment; filename="paper-executions.json"'})
             elif self.path == '/api/trials':
                 self.respond(200,json.dumps(ShadowTrials(os.getenv('DATA_DIR','/data')).state(),allow_nan=False))
             elif self.path in ('/api/experiments','/api/experiments/export') and experiments:
@@ -316,7 +320,7 @@ def monitoring_status(directory):
         row=db.execute('SELECT body FROM ledger WHERE id=1').fetchone()
     if not row:raise ValueError('Paper account is not available')
     state=json.loads(row[0]);now=datetime.now(ZoneInfo('UTC'))
-    result={key:state.get(key) for key in ('mode','paused','buy_block','risk_latched','day_block','cash','equity','contributed_capital','fx','last_check','last_success','error')}
+    result={key:state.get(key) for key in ('mode','paused','buy_block','risk_latched','day_block','cash','equity','contributed_capital','account_limits','fx','last_check','last_success','error')}
     result.update(generated_at=now.isoformat(),software_version=VERSION,read_only=True,
         worker_health='Unknown: this is a saved account snapshot, not a live worker health check.',
         valuation_note='Stored prices and FX from the last successful account check; unrealised GBP returns include purchase costs but exclude future selling costs.')
@@ -381,11 +385,25 @@ def monitoring_decisions(directory,arguments,trades=False):
     clause=' WHERE '+' AND '.join(where) if where else ''
     with closing(monitor_db(directory,'decisions.sqlite3')) as db:
         rows=db.execute('SELECT body FROM decisions'+clause+' ORDER BY at DESC,rowid DESC LIMIT ?',(*params,limit+1)).fetchall()
+    execution_rows=[]
+    if trades:
+        try:
+            with closing(monitor_db(directory,'paper.sqlite3')) as account_db:
+                query="SELECT body FROM executions"+(" WHERE json_extract(body,'$.day')=?" if day else '')+" ORDER BY at DESC,rowid DESC LIMIT ?"
+                execution_rows=[json.loads(r[0]) for r in account_db.execute(query,((day,limit+1) if day else (limit+1,)))]
+        except sqlite3.OperationalError:pass  # Pre-update accounts have no execution table.
     records=[]
     for row in rows[:limit]:
-        data=json.loads(row[0]);records.append({key:data.get(key) for key in ('at','day','symbol','action','reason','quote_usd','purchase_limit','rank','selected','held_before','features','coverage','news_basis')})
-    return monitor_redact({'records':records,'limit':limit,'more_available':len(rows)>limit,'day':day,'day_timezone':'America/New_York',
-        'note':'Decision journal retention is 90 days / 250,000 observations. Trade records identify actions and decision quotes, not a full broker execution statement.'},directory)
+        data=json.loads(row[0]);records.append({key:data.get(key) for key in ('at','day','symbol','action','reason','quote_usd','purchase_limit','rank','selected','held_before','features','coverage','news_basis','execution_id')})
+    if trades:
+        complete={(e['at'],e['symbol'],e['side']):e for e in execution_rows}
+        ids={e['id'] for e in execution_rows}
+        records=[r for r in records if r.get('execution_id') not in ids and (r['at'],r['symbol'],r['action']) not in complete]
+        records.extend(dict(e,action=e['side'],execution_accounting=True) for e in execution_rows)
+        records.sort(key=lambda r:(r['at'],r['symbol']),reverse=True)
+    more=len(records)>limit or len(rows)>limit
+    return monitor_redact({'records':records[:limit],'limit':limit,'more_available':more,'day':day,'day_timezone':'America/New_York',
+        'note':'Decision journal retention is 90 days / 250,000 observations. New execution_accounting records contain atomic simulated fills and costs; older decision-only records remain incomplete. These are not broker statements.'},directory)
 
 
 def monitoring_rpc(message,directory):
@@ -446,7 +464,7 @@ def main():
     lock = (directory/'worker.lock').open('w')
     try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError: raise SystemExit('Another worker is already using this data disk.')
-    ledger = Ledger(directory/'paper.sqlite3')
+    ledger = Ledger(directory/'paper.sqlite3',initial_cash=10000,max_positions=5,purchase_cap=1000)
     news = optional_news(directory)
     news_thread = threading.Thread(target=news.worker, args=(ledger, STOP), daemon=True)
     news_thread.start()

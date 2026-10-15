@@ -14,15 +14,15 @@ class DiagnosticsTests(unittest.TestCase):
             clock.now.side_effect=lambda zone:now.astimezone(zone)
             budget=ApiBudget(root)
             self.assertEqual(budget.history_headroom(),168)
-            for _ in range(332):budget.reserve(purpose='history')
+            for _ in range(238):budget.reserve(purpose='history')
             with self.assertRaises(BudgetDeferred):budget.reserve(purpose='history')
-            self.assertEqual(budget.used(),332)
-            for _ in range(168):budget.reserve()
+            self.assertEqual(budget.used(),238)
+            with self.assertRaises(BudgetDeferred):budget.reserve()
             with self.assertRaises(ValueError):budget.reserve(purpose='diagnostic')
             budget.reserve(priority=True)
-            self.assertEqual(budget.used(),501)
+            self.assertEqual(budget.used(),239)
             self.assertEqual(budget.state()['normal_remaining'],0)
-            self.assertEqual(budget.state()['total_remaining'],199)
+            self.assertEqual(budget.state()['total_remaining'],461)
 
     def test_research_does_not_spend_during_session_and_has_persisted_subcap(self):
         with tempfile.TemporaryDirectory() as root,patch('market.datetime') as clock:

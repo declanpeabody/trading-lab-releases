@@ -153,7 +153,9 @@ class RankedScanner(Scanner):
         self.audit['bars']=dict(bars)
         self.audit['at']=self.now('UTC').isoformat()
         raw={};received={};prices={};fxdata=None;fx=None
-        limit=self.experiments.active_limit() if self.experiments else 200
+        slots=getattr(ledger,'max_positions',5)
+        expanded=getattr(ledger,'purchase_cap',200)==1000
+        limit=1000 if expanded else self.experiments.active_limit() if self.experiments else 200
         self.status['active_purchase_limit']=limit
 
         def fetch(symbol,priority=False):
@@ -193,20 +195,46 @@ class RankedScanner(Scanner):
             self.status['holdings_checked_at']=at
             if ledger.read().get('error'):return
 
+        # Five-holding free-plan profile: protect frequent mandatory checks.
+        # Persist the optional-stage timestamp so restarts do not spend another batch.
+        free_monitoring=expanded and slots==5
+        if free_monitoring:
+            last=self.state.get('optional_checked_at',0)
+            if held and 0<=self.timestamp()-last<1800:
+                self.status['selected']=[]
+                self.status['quote_requested']=[]
+                notes.append('Free-plan monitoring: holdings checked; candidates, comparisons and history preparation run at most every 30 minutes.')
+                return
+            self.state['optional_checked_at']=self.timestamp();self.save()
+
+        # One optional SPY quote attempt per session; never use reserved credits.
+        # Existing fresh account FX is reused; unavailable benchmark cannot block exits.
+        if free_monitoring and held and self.state.get('benchmark_attempt_day')!=today:
+            self.state['benchmark_attempt_day']=today;self.save()
+            try:
+                benchmark=self.market.get('quote',symbol='SPY',exchange='NYSE Arca',prepost='false')
+                check=self.timestamp();value=quote(benchmark,'SPY',check,'USD')
+                if benchmark.get('exchange')!='NYSE Arca' or benchmark.get('is_extended_hours') is True:raise ValueError('Benchmark identity/session mismatch')
+                rate=validate('USD/GBP',check)
+                ledger.record_benchmark(value,rate,self.now('UTC').isoformat(),ledger.read()['last_success'],today)
+            except (ValueError,KeyError,TypeError,OSError,sqlite3.Error):notes.append('Optional SPY benchmark unavailable today; account checks unaffected.')
+
         live=ledger.read()
         needs_entries=(not any(live.get(k) for k in ('paused','buy_block','risk_latched','day_block'))
-                       and live['cash']>=1 and len(live['positions'])<5)
+                       and live['cash']>=1 and len(live['positions'])<slots)
         experiments_need=(self.experiments and self.experiments.state()['enabled']) or self.trial_call('state')['enabled']
         if not needs_entries and not experiments_need:
             requested=[]
             notes.append('Candidate quotes deferred: no active entry capacity and experiments disabled.')
         elif not experiments_need:
-            requested=selected=selected[:min(6,5-len(live['positions'])+1)]
+            requested=selected=selected[:min(6,slots-len(live['positions'])+1)]
         if getattr(self.experiments,'error',None):
             needs_entries=False;requested=[]
             self.status['optional_error']=self.experiments.error
             notes.append(self.experiments.error)
         self.status['selected']=selected
+        self.status['active_entry_needed']=bool(needs_entries)
+        self.status['entry_skip_reason']=('User blocked buys' if live.get('buy_block') else 'Total drawdown buying lock' if live.get('risk_latched') else 'Daily drawdown buying block' if live.get('day_block') else 'Position limit reached' if len(live['positions'])>=slots else 'Insufficient cash' if live['cash']<1 else None)
         self.status['quote_requested']=requested
         try:
             for symbol in requested:
@@ -246,7 +274,7 @@ class RankedScanner(Scanner):
                     self.audit['prices'].update(prices);self.status['checked']=list(self.audit['prices'])
                     if self.experiments and not ledger.read().get('error') and not ledger.read()['paused']:
                         self.experiments.observe(prices,bars,fx,today,at,entry_symbols,buy_block=live['buy_block'])
-                        self.experiments.promote(ledger,today)
+                        if not expanded:self.experiments.promote(ledger,today)
                     self.trial_call('observe',prices,bars,fx,today,at,entry_symbols,buy_block=live['buy_block'])
                 else:
                     self.trial_call('miss','Quotes expired during optional checks; all trial books held')
@@ -281,7 +309,7 @@ class RankedScanner(Scanner):
         # Preserve the cursor across days/restarts so quota limits cannot starve the tail.
         cursor=self.state.get('screen_cursor',0);visited=0;batch=[];deadline=self.monotonic()+180
         budget=self.budget or ApiBudget(self.directory);shared_failure=None
-        while universe and visited<len(universe) and len(batch)<HISTORY_BATCH:
+        while universe and visited<len(universe) and len(batch)<(5 if free_monitoring else HISTORY_BATCH):
             if ledger.read()['paused'] or not session_window(self.now('America/New_York')):break
             if self.monotonic()>=deadline:break
             if budget.used()>=500:
@@ -367,11 +395,13 @@ class Journal:
                 elif not status.get('ranking_complete') and not status.get('partial_ranking_allowed'):action,reason='SKIP','Incomplete watchlist coverage'
                 elif not features['eligible']:action,reason='SKIP','; '.join(features['reasons'])
                 elif symbol not in selected:action,reason='SKIP','Outside this cycle’s candidate quote allocation'
-                elif not status.get('quote_requested',selected) and len(audit['before'].get('positions',{}))>=5:action,reason='SKIP','Five-position limit; optional quote not requested'
+                elif not status.get('quote_requested',selected) and len(audit['before'].get('positions',{}))>=audit['before'].get('account_limits',{}).get('max_positions',5):action,reason='SKIP','Position limit; optional quote not requested'
+                elif status.get('active_entry_needed') is False and status.get('entry_skip_reason'):
+                    action,reason='SKIP',status['entry_skip_reason']+('; quote collected for research only' if symbol in prices else '')
                 elif symbol not in prices:action,reason='SKIP','Fresh valid quote unavailable'
                 else:action,reason='NOT_EVALUATED','Account paused or cycle not completed'
                 body=dict(scan_id=scan,at=stamp,day=day,symbol=symbol,strategy_version=status.get("version",VERSION),
-                    action=action,reason=reason,rank=ranks.get(symbol),features=features,purchase_limit=status.get('active_purchase_limit',200),
+                    action=action,reason=reason,execution_id=actions.get(symbol,{}).get('execution_id'),rank=ranks.get(symbol),features=features,purchase_limit=status.get('active_purchase_limit',200),
                     selected=symbol in selected,held_before=symbol in held,
                     quote_usd=prices.get(symbol),reference_day=rows[-1]['datetime'][:10] if rows else None,
                     prior_close=features['prior_close'] if features else None,

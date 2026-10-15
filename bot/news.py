@@ -158,10 +158,15 @@ class News:
         self.mapping = {}
         self.map_time = 0
         self.client_factory = client_factory
+        try:self.feeds=FeedResearch(self.directory)
+        except Exception:self.feeds=None
 
     def configure(self, payload):
         with self.lock:
-            if payload.get('action') == 'refresh':
+            if payload.get('action') in ('feeds_enable','feeds_disable'):
+                if self.feeds is None:raise ValueError('Feed storage unavailable; existing files preserved')
+                self.config['feeds']=payload['action']=='feeds_enable'
+            elif payload.get('action') == 'refresh':
                 if not self.config['enabled']: raise ValueError('Enable news first')
                 # Refresh cannot defeat the automatic polling rate.
                 if self.info['last_attempt'] and (datetime.now(timezone.utc)-datetime.fromisoformat(self.info['last_attempt'])).total_seconds()<300:
@@ -173,7 +178,7 @@ class News:
                     raise ValueError('Enter a valid contact email; it will be sent to the SEC in request headers')
                 documents=payload.get('documents',False)
                 if type(documents) is not bool:raise ValueError('Document option must be true or false')
-                self.config = {'enabled':True,'contact':contact,'documents':documents}
+                self.config.update(enabled=True,contact=contact,documents=documents)
             else: raise ValueError('Unknown news control')
             tmp = self.config_path.with_suffix('.tmp')
             tmp.write_text(json.dumps(self.config))
@@ -185,7 +190,8 @@ class News:
         with self.lock:
             rows = self.db.execute("SELECT body FROM events ORDER BY json_extract(body,'$.first_seen') DESC, json_extract(body,'$.filing_date') DESC, rowid DESC" + ('' if all_events else ' LIMIT 100')).fetchall()
             return self.info | {'enabled':self.config['enabled'],'busy':self.busy,
-                'documents':self.config.get('documents',False),
+                'documents':self.config.get('documents',False),'feeds_enabled':self.config.get('feeds',False),
+                'feeds':self.feeds.state() if self.feeds else {'error':'Feed storage unavailable; existing files preserved','observations':[],'sources':[]},
                 'mode':'Observation only · SEC filings; optional document evidence',
                 'events':[json.loads(row[0]) for row in rows]}
 
@@ -272,6 +278,11 @@ class News:
             try: self.poll(ledger.read())
             except Exception:
                 with self.lock: self.info['error']='News observer error; paper trading unaffected.'
+            try:
+                if self.feeds and self.config.get('feeds',False):
+                    self.feeds.poll(ledger.read(),lambda:self.config.get('feeds',False) and not stop.is_set())
+            except Exception:
+                with self.lock:self.info['error']='Feed observer error; trading unaffected.'
             self.wake.wait(1800)
             self.wake.clear()
 
@@ -289,3 +300,155 @@ class UnavailableNews:
 def optional_news(directory):
     try:return News(directory)
     except Exception:return UnavailableNews()
+
+# Fixed public feed endpoints only: no arbitrary URL fetching or paid API calls.
+FEED_SOURCES = {
+    'bbc': ('BBC Business', 'news', 'https://feeds.bbci.co.uk/news/business/rss.xml'),
+    'stockaholics': ('Stockaholics', 'forum', 'https://stockaholics.net/forums/-/index.rss'),
+}
+COMPANY_ALIASES = {'AAPL':'Apple','MSFT':'Microsoft','AMZN':'Amazon','GOOGL':'Alphabet',
+    'META':'Meta','NVDA':'Nvidia','TSLA':'Tesla','ABBV':'AbbVie','ORCL':'Oracle',
+    'WMT':'Walmart','NFLX':'Netflix','INTC':'Intel','AMD':'Advanced Micro Devices'}
+CATALYST_TERMS = {'Earnings / guidance':r'\b(earnings|guidance|profit warning|results)\b',
+    'Deal / contract':r'\b(acquisition|merger|contract|partnership|takeover)\b',
+    'Regulatory / legal':r'\b(FDA|approval|regulator|lawsuit|investigation)\b',
+    'Financing / dilution':r'\b(offering|financing|dilution|bankruptcy)\b',
+    'Product / operations':r'\b(launch|recall|outage|production)\b'}
+
+
+def feed_link(url):
+    from urllib.parse import urlsplit, urlunsplit
+    try:
+        p=urlsplit(url)
+        hosts=('bbc.com','bbc.co.uk','stockaholics.net')
+        if p.scheme!='https' or p.username or p.password or p.port not in (None,443):return None
+        if not any(p.hostname==h or (p.hostname or '').endswith('.'+h) for h in hosts):return None
+        return urlunsplit((p.scheme,p.netloc,p.path,p.query,''))
+    except ValueError:return None
+
+
+def feed_items(body, source, symbols, now):
+    """Headlines only. Feed content is data, never executable instructions."""
+    import xml.etree.ElementTree as ET
+    from email.utils import parsedate_to_datetime
+    from html import unescape
+    if len(body)>1_000_000 or b'\x00' in body or b'<!DOCTYPE' in body.upper() or b'<!ENTITY' in body.upper():
+        raise ValueError('Feed size or XML declaration rejected')
+    root=ET.fromstring(body)
+    if root.tag not in ('rss','{http://www.w3.org/2005/Atom}feed'):raise ValueError('Expected RSS or Atom')
+    rows=[];name,kind,_=FEED_SOURCES[source]
+    for item in list(root.findall('./channel/item'))[:100]+list(root.findall('{http://www.w3.org/2005/Atom}entry'))[:100]:
+        fields={child.tag.split('}')[-1]:child for child in item}
+        def value(key):return ''.join(fields[key].itertext()).strip() if key in fields else ''
+        title=' '.join(unescape(re.sub('<[^>]+>',' ',value('title'))).split())[:400]
+        url=feed_link(value('link') or (fields['link'].get('href','') if 'link' in fields else ''))
+        if not title or not url:continue
+        date=value('pubDate') or value('published') or value('updated')
+        try:
+            try:published=parsedate_to_datetime(date)
+            except (ValueError,TypeError):published=datetime.fromisoformat(date.replace('Z','+00:00'))
+            if published.tzinfo is None:continue
+            published=published.astimezone(timezone.utc)
+            if not now-timedelta(days=7)<=published<=now+timedelta(minutes=5):continue
+        except (ValueError,TypeError,OverflowError):continue
+        matched=[]
+        for symbol in sorted(symbols):
+            explicit=re.search(r'(?:\$|\b(?:NASDAQ|NYSE)\s*:\s*)'+re.escape(symbol)+r'(?![A-Z0-9.])',title,re.I)
+            named=COMPANY_ALIASES.get(symbol)
+            # Bare tickers are ambiguous: require $/exchange notation, a thread-title
+            # prefix, or an explicit company alias. Matching is not identity proof.
+            prefix=kind=='forum' and re.match(re.escape(symbol)+r'\s*[-–:]\s',title)
+            if explicit or prefix or (named and re.search(r'\b'+re.escape(named)+r'\b',title,re.I)):matched.append(symbol)
+        if len(matched)>5 or re.search(r'guaranteed|1000%|join.{0,20}(telegram|discord)|risk.free',title,re.I):continue
+        categories=[label for label,pattern in CATALYST_TERMS.items() if re.search(pattern,title,re.I)]
+        for symbol in matched:
+            key=hashlib.sha256((symbol+':'+re.sub(r'\W+','',title.lower())).encode()).hexdigest()
+            rows.append(dict(id=key,symbol=symbol,title=title,source=name,kind=kind,source_url=url,
+                author=(value('creator') or value('author'))[:100] or None,
+                published_at=published.isoformat(),first_seen=now.isoformat(),
+                categories=categories or ['Discussion / general report'],
+                confidence='Low: unverified forum discussion' if kind=='forum' else 'Headline report: claim not independently verified',
+                timing='Upcoming-event wording; date not verified' if re.search(r'\b(upcoming|next week|tomorrow|scheduled|will report)\b',title,re.I) else 'Event timing unverified',
+                baseline=None,outcomes={},analyser_version='feed-observer-v1'))
+    return rows
+
+
+class FeedResearch:
+    """Independent observation store; never calls Market or writes the paper ledger."""
+    def __init__(self,directory):
+        self.lock=threading.RLock()
+        self.db=sqlite3.connect(Path(directory)/'feed-observations.sqlite3',check_same_thread=False)
+        self.db.execute('CREATE TABLE IF NOT EXISTS observations(id TEXT PRIMARY KEY, body TEXT NOT NULL)')
+        self.db.execute('CREATE TABLE IF NOT EXISTS sources(id TEXT PRIMARY KEY, body TEXT NOT NULL)')
+        self.db.commit()
+
+    def fetch(self,source):
+        req=Request(FEED_SOURCES[source][2],headers={'User-Agent':'DeclanTradingLab/1.0 RSS reader','Accept':'application/rss+xml, application/atom+xml, text/xml'})
+        try:
+            with build_opener(NoRedirect()).open(req,timeout=15) as response:body=response.read(1_000_001)
+            if len(body)>1_000_000:raise ValueError('Feed too large')
+            return body
+        except HTTPError as exc:
+            code=exc.code;exc.close()
+            raise ValueError(f'HTTP {code}: source unavailable or access restricted; no bypass attempted') from None
+        except OSError:raise ValueError('Feed connection unavailable') from None
+
+    def poll(self,account,enabled=lambda:True):
+        now=datetime.now(timezone.utc)
+        scanner=account.get('scanner',{})
+        symbols=set(scanner.get('universe_symbols',[]))|set(account.get('positions',{}))|set(scanner.get('selected',[]))|set(COMPANY_ALIASES)
+        symbols={s for s in symbols if isinstance(s,str) and re.fullmatch(r'[A-Z][A-Z0-9.]{0,9}',s)}
+        for source in FEED_SOURCES:
+            if not enabled():break
+            with self.lock:
+                row=self.db.execute('SELECT body FROM sources WHERE id=?',(source,)).fetchone()
+                info=json.loads(row[0]) if row else {}
+                if info.get('last_attempt') and (now-datetime.fromisoformat(info['last_attempt'])).total_seconds()<1800:continue
+                info.update(last_attempt=now.isoformat(),error=None)
+                with self.db:self.db.execute('INSERT OR REPLACE INTO sources VALUES (?,?)',(source,json.dumps(info)))
+            try:
+                rows=feed_items(self.fetch(source),source,symbols,now)
+                if not enabled():break
+                with self.lock,self.db:
+                    for row in rows:self.db.execute('INSERT OR IGNORE INTO observations VALUES (?,?)',(row['id'],json.dumps(row)))
+                info.update(last_success=now.isoformat(),matched_items=len(rows))
+            except Exception as exc:
+                info['error']=str(exc) if isinstance(exc,ValueError) else 'Feed could not be parsed; observations retained'
+            with self.lock,self.db:
+                self.db.execute('INSERT OR REPLACE INTO sources VALUES (?,?)',(source,json.dumps(info)))
+        with self.lock,self.db:
+            self.db.execute("DELETE FROM observations WHERE json_extract(body,'$.first_seen')<?",((now-timedelta(days=30)).isoformat(),))
+            self.db.execute('DELETE FROM observations WHERE rowid NOT IN (SELECT rowid FROM observations ORDER BY rowid DESC LIMIT 5000)')
+            # Opportunistic outcomes use existing fresh account marks only. Missing
+            # coverage remains pending; no extra quotes or invented returns.
+            try:stamp=datetime.fromisoformat(account.get('last_success','').replace('Z','+00:00'))
+            except (ValueError,AttributeError,TypeError):return
+            if stamp.tzinfo is None or account.get('error') or not 0<=(now-stamp).total_seconds()<=120:return
+            import math
+            for ident,body in self.db.execute('SELECT id,body FROM observations').fetchall():
+                event=json.loads(body);price=account.get('marks',{}).get(event['symbol'])
+                if type(price) not in (int,float) or not math.isfinite(price) or price<=0:continue
+                seen=datetime.fromisoformat(event['first_seen'])
+                if stamp<seen:continue
+                if event['baseline'] is None:event['baseline']={'at':stamp.isoformat(),'price_usd':price}
+                else:
+                    base=event['baseline'];start=datetime.fromisoformat(base['at'])
+                    for label,seconds in [('1h',3600),('1d',86400)]:
+                        if label not in event['outcomes'] and (stamp-start).total_seconds()>=seconds:
+                            event['outcomes'][label]={'at':stamp.isoformat(),'price_usd':price,'change_pct':100*(price/base['price_usd']-1)}
+                self.db.execute('UPDATE observations SET body=? WHERE id=?',(json.dumps(event),ident))
+
+    def state(self):
+        with self.lock:
+            rows=[json.loads(r[0]) for r in self.db.execute('SELECT body FROM observations ORDER BY rowid DESC LIMIT 5000')]
+            statuses={k:json.loads(v) for k,v in self.db.execute('SELECT id,body FROM sources')}
+        now=datetime.now(timezone.utc);counts={}
+        for e in rows:
+            if e['kind']!='forum' or datetime.fromisoformat(e['published_at'])<now-timedelta(days=1):continue
+            c=counts.setdefault(e['symbol'],{'posts':0,'authors':set()});c['posts']+=1
+            if e['author']:c['authors'].add(e['author'])
+        discussions=[{'symbol':s,'posts':c['posts'],'authors':len(c['authors']),
+            'label':'Multiple-author discussion; independence unverified' if c['posts']>=3 and len(c['authors'])>=3 else 'Limited discussion evidence'} for s,c in counts.items()]
+        return {'sources':[{'id':k,'name':v[0],'kind':v[1],**statuses.get(k,{})} for k,v in FEED_SOURCES.items()],
+            'observations':rows[:100],'discussion':discussions,
+            'note':'Partial headline/feed coverage, not all articles or forum comments. Counts are unique matched headlines in received feeds, not market-wide mention spikes. Outcomes use the first fresh saved USD mark after discovery and later available marks at least 1h/1d afterwards; they may be delayed, are unadjusted for corporate actions/costs, and do not establish predictive value.'}

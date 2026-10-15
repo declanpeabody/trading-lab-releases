@@ -155,7 +155,8 @@ class ScannerTests(unittest.TestCase):
 
 class BudgetTests(unittest.TestCase):
     def test_limits_priority_reserve_and_restart(self):
-        with tempfile.TemporaryDirectory() as root:
+        # Absolute daily ceilings outside the protected monitoring window.
+        with tempfile.TemporaryDirectory() as root,patch.object(ApiBudget,'monitoring_headroom',return_value=0):
             b = ApiBudget(root)
             for _ in range(500): b.reserve()
             with self.assertRaises(ValueError): ApiBudget(root).reserve()
