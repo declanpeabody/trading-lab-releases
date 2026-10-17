@@ -15,13 +15,14 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 from engine import Ledger
 from market import Market, session_window, validate_key, MarketUnavailable, ApiBudget, ConnectionTest
-from research import Research, Experiments, ShadowTrials, ReliableExperiments
+from research import Research, Experiments, ShadowTrials, ReliableExperiments, StrategyObservatory
 from ranked_scanner import RankedScanner, Journal
 from news import News, optional_news
 from updater import Updates
 from version import VERSION
 
 ROOT = Path(__file__).parent
+PROCESS_STARTED_AT = datetime.now(ZoneInfo('UTC')).isoformat()
 STOP = threading.Event()
 WORKER = {'state':'starting','message':'Worker starting','heartbeat':time.time(),'due':time.time()+300}
 
@@ -39,7 +40,7 @@ def persist_worker():
     path=Path(os.getenv('DATA_DIR','/data'))/'worker-status.json'
     try:
         tmp=path.with_suffix('.tmp')
-        tmp.write_text(json.dumps(WORKER|{'pid':os.getpid(),'recorded_at':time.time()}))
+        tmp.write_text(json.dumps(WORKER|{'pid':os.getpid(),'recorded_at':time.time(),'version':VERSION,'started_at':PROCESS_STARTED_AT}))
         tmp.chmod(0o600);tmp.replace(path)
     except OSError:pass  # Existing health endpoint remains available on disk failure.
 
@@ -50,7 +51,7 @@ def saved_worker(directory,now=None):
         data=json.loads((Path(directory)/'worker-status.json').read_text())
         age=now-float(data['recorded_at']);due=float(data['due'])
         if age<0 or not 0<due<now+86400:raise ValueError()
-        return {'state':data['state'],'recorded_at':data['recorded_at'],
+        return {'state':data['state'],'recorded_at':data['recorded_at'],'version':data.get('version'),'started_at':data.get('started_at'),
                 'next_check_epoch':due,'seconds_since_progress':age,
                 'overdue':now>due+900,'note':'Saved progress only; not a process liveness probe.'}
     except (OSError,ValueError,KeyError,TypeError):return {'state':'unknown','note':'No valid saved worker progress available.'}
@@ -74,6 +75,8 @@ def worker(ledger):
                 try:scanner.cycle(ledger)
                 except ValueError as exc:ledger.fail(str(exc))
                 scanner.record_status(ledger)
+                try:StrategyObservatory(directory).observe(ledger.read())
+                except (OSError,ValueError,sqlite3.Error):pass  # Optional research cannot block holdings.
             WORKER={'state':'waiting','message':'Worker active; waiting for the next scheduled check','heartbeat':time.time(),'due':time.time()+delay}
         except Exception:
             # Disk/database/init/status errors must not escape and silently kill this thread.
@@ -88,7 +91,7 @@ def worker(ledger):
 
 def top_navigation(path,nonce):
     links=[('/#overview','Overview'),('/#positions','Positions'),('/#scanner','Scanner'),('/#markets','Markets'),
-           ('/research','Research & Journal'),('/research#experiments','Strategy Experiments'),('/news','News'),('/#rules','Rules & Limits'),('/updates','Software Updates')]
+           ('/research','Research & Journal'),('/research#observatory','Strategy Observatory'),('/research#experiments','Strategy Experiments'),('/news','News'),('/#rules','Rules & Limits'),('/updates','Software Updates')]
     style='<style nonce="'+nonce+'">.top-nav{display:flex;flex-wrap:wrap;gap:8px;margin:20px 0;padding:0 0 16px;border-bottom:1px solid #2b3545}.top-nav a{display:inline-flex;align-items:center;min-height:44px;padding:10px 14px;border:1px solid #3f4d63;border-radius:7px;color:#c6d0df;background:#111925;text-decoration:none;font:600 13px system-ui}.top-nav a[aria-current]{color:#101620;background:#d8f36a;border-color:#d8f36a}.top-nav a:focus-visible{outline:3px solid #a8ceff;outline-offset:3px}</style>'
     return style+'<nav class="top-nav" aria-label="Dashboard navigation">'+''.join(
         '<a href="'+href+'"'+(' aria-current="page"' if href==path else '')+'>'+label.replace('&','&amp;')+'</a>' for href,label in links)+'</nav>'
@@ -159,6 +162,7 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
                 except Exception:
                     self.respond(503,json.dumps({'error':'Account storage unavailable','worker':worker_health(thread)}));return
                 state['worker']=worker_health(thread)
+                state['components']={'dashboard_version':VERSION,'worker_version':VERSION,'started_at':PROCESS_STARTED_AT,'effective_limits':state.get('account_limits')}
                 if experiments:
                     try:
                         state['active_purchase_limit']=1000 if state.get('account_limits',{}).get('purchase_cap')==1000 else experiments.active_limit()
@@ -181,6 +185,8 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
                 self.respond(200, json.dumps(state, allow_nan=False))
             elif self.path == '/api/accounting/export':
                 self.respond(200,json.dumps(ledger.accounting(100000),allow_nan=False),extra={'Content-Disposition':'attachment; filename="paper-executions.json"'})
+            elif self.path == '/api/observatory':
+                self.respond(200,json.dumps(StrategyObservatory(os.getenv('DATA_DIR','/data')).state(),allow_nan=False))
             elif self.path == '/api/trials':
                 self.respond(200,json.dumps(ShadowTrials(os.getenv('DATA_DIR','/data')).state(),allow_nan=False))
             elif self.path in ('/api/experiments','/api/experiments/export') and experiments:
@@ -217,7 +223,7 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
 
         def do_POST(self):
             if not self.authorized(): return
-            if self.path not in ('/api/control', '/api/research', '/api/news', '/api/updates', '/api/experiments', '/api/connection-test', '/api/monitoring', '/api/trials'):
+            if self.path not in ('/api/control', '/api/research', '/api/news', '/api/updates', '/api/experiments', '/api/connection-test', '/api/monitoring', '/api/trials', '/api/observatory'):
                 self.respond(404, '{"error":"Not found"}')
                 return
             if not hmac.compare_digest(self.headers.get('X-CSRF-Token',''),csrf):
@@ -225,7 +231,7 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
                 return
             try:
                 length = int(self.headers.get('Content-Length','0'))
-                if not 0 < length <= (16000 if self.path=='/api/updates' else 1024): raise ValueError()
+                if not 0 < length <= (100000 if self.path=='/api/observatory' else 16000 if self.path=='/api/updates' else 1024): raise ValueError()
                 payload = json.loads(self.rfile.read(length))
                 if not isinstance(payload,dict):raise ValueError('Expected an object')
                 if self.path == '/api/monitoring':
@@ -236,6 +242,8 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
                     experiments.control(payload['action'],payload.get('enabled'))
                 elif self.path == '/api/research' and research:
                     research.start(payload)
+                elif self.path == '/api/observatory':
+                    StrategyObservatory(os.getenv('DATA_DIR','/data')).import_csv(payload['csv'])
                 elif self.path == '/api/trials':
                     ShadowTrials(os.getenv('DATA_DIR','/data')).control(payload.get('action'),payload.get('enabled'))
                 elif self.path == '/api/news' and news:
@@ -253,7 +261,7 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
                 else:
                     raise ValueError('Research unavailable')
             except (ValueError, KeyError, TypeError) as exc:
-                self.respond(400, json.dumps({'error':str(exc) if self.path in ('/api/news','/api/updates','/api/connection-test') else 'Invalid control'}))
+                self.respond(400, json.dumps({'error':str(exc) if self.path in ('/api/news','/api/updates','/api/connection-test','/api/observatory') else 'Invalid control'}))
                 return
             self.respond(200, '{"ok":true}')
 
@@ -340,6 +348,11 @@ def monitoring_status(directory):
             unrealised_pct=profit/cost*100 if profit is not None else None,reconciliation_required=bool(p.get('reconciliation')))
         positions.append(item)
     result['worker_progress']=saved_worker(directory)
+    result['components']={'monitor_version':VERSION,'monitor_started_at':PROCESS_STARTED_AT,
+        'worker_version':result['worker_progress'].get('version'),'worker_started_at':result['worker_progress'].get('started_at'),
+        'restart_monitor_required':bool(result['worker_progress'].get('version') and result['worker_progress']['version']!=VERSION)}
+    result['performance']=state.get('performance')
+    result['benchmark']=state.get('benchmark')
     result['positions']=positions
     scan=state.get('scanner',{})
     result['scanner']={key:scan.get(key) for key in ('updated_at','decision_at','target_count','universe_count','histories_ready','ranked_histories','histories_pending','selected','checked','decision_state','quote_failures','history_failures','holdings_checked_at','optional_error','quote_wait_seconds')}

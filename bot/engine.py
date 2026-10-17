@@ -108,6 +108,10 @@ class Ledger:
             for field in ('cash', 'equity', 'day_start'):
                 state[field] += addition
             state['contributed_capital'] = funded + addition
+            # Issue units at the last measured NAV; deposits never create returns.
+            if addition and state.get('performance'):
+                perf=state['performance']
+                perf['units']+=addition/positive(perf['nav'])
             state['account_limits']={'max_positions':self.max_positions,'purchase_cap':self.purchase_cap}
             self.db.execute('UPDATE ledger SET body=? WHERE id=1', (json.dumps(state,allow_nan=False),))
             if addition:
@@ -217,6 +221,8 @@ class Ledger:
             s.update(last_check=stamp, last_success=stamp, error=None,
                      marks=prices, fx=fx, signals=signals)
             equity = s['cash'] + sum(p['qty'] * prices[k] * fx for k,p in s['positions'].items())
+            if hasattr(self,'db') and not s.get('performance'):
+                s['performance']=dict(start=stamp,units=positive(equity),nav=1.0,peak=1.0,daily=[])
             if s['day'] != date:
                 s.update(day=date, day_start=equity, day_block=False)
             s['risk_latched'] |= equity <= s['contributed_capital'] * (1-LOSS_FRACTION)
@@ -290,7 +296,15 @@ class Ledger:
             s['equity'] = s['cash'] + sum(p['qty'] * prices[k] * fx for k,p in s['positions'].items())
             if s['cash'] < -1e-8:
                 raise ValueError('Negative cash rejected')
-            if hasattr(self,'db'):self.write(s,messages,executions)
+            if hasattr(self,'db'):
+                perf=s['performance'];perf['nav']=s['equity']/perf['units']
+                perf['peak']=max(perf['peak'],perf['nav'])
+                perf['return_pct']=100*(perf['nav']-1)
+                perf['drawdown_pct']=100*(1-perf['nav']/perf['peak'])
+                perf['max_drawdown_pct']=max(perf.get('max_drawdown_pct',0),perf['drawdown_pct'])
+                sample=dict(day=date,at=stamp,equity_gbp=s['equity'],cash_gbp=s['cash'],nav=perf['nav'],return_pct=perf['return_pct'])
+                perf['daily']=[r for r in perf['daily'] if r['day']!=date][-999:]+[sample]
+                self.write(s,messages,executions)
             else:self.write(s,messages)
             return decisions
 
@@ -300,7 +314,18 @@ class Ledger:
             executions=[json.loads(x[0]) for x in self.db.execute('SELECT body FROM executions ORDER BY at DESC,rowid DESC LIMIT ?',(limit,))]
             funding=[json.loads(x[0]) for x in self.db.execute('SELECT body FROM funding ORDER BY at DESC,rowid DESC')]
             summary=self.db.execute("SELECT COUNT(*),COALESCE(SUM(json_extract(body,'$.realised_pnl_gbp')),0),COALESCE(SUM(json_extract(body,'$.price_cost_gbp')+json_extract(body,'$.fx_cost_gbp')),0) FROM executions").fetchone()
-            return dict(executions=executions,funding=funding,recorded_executions=summary[0],recorded_realised_gbp=summary[1],recorded_modelled_costs_gbp=summary[2],
+            state=self.read();positions=[]
+            for symbol,p in state['positions'].items():
+                mark=state.get('marks',{}).get(symbol);fx=state.get('fx');entry_fx=p.get('entry_fx')
+                row=dict(symbol=symbol,price_pnl_gbp=None,fx_pnl_gbp=None,entry_cost_residual_gbp=None)
+                if mark and fx and entry_fx:
+                    row.update(price_pnl_gbp=p['qty']*(mark-p['entry_usd'])*entry_fx,
+                        fx_pnl_gbp=p['qty']*mark*(fx-entry_fx),
+                        entry_cost_residual_gbp=p['qty']*p['entry_usd']*entry_fx-p['cost_gbp'])
+                positions.append(row)
+            invested=state['equity']-state['cash']
+            return dict(open_attribution=positions,exposure_pct=100*invested/state['equity'] if state['equity']>0 else None,
+                performance=state.get('performance'),executions=executions,funding=funding,recorded_executions=summary[0],recorded_realised_gbp=summary[1],recorded_modelled_costs_gbp=summary[2],
                 note='Complete execution records start with this update. Earlier trades are not reconstructed. Recorded realised profit and costs cover these records only; deposits are not profit. Execution costs are assumptions, not broker charges.')
 
     def record_benchmark(self,spy,fx,at,account_at,day):

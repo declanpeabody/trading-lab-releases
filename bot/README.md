@@ -147,3 +147,12 @@ market-data integration have not been tested with authenticated accounts.
 - https://twelvedata.com/docs/markets/market-state
 
 Python 3.12+, standard library only. Review source before supplying secrets.
+
+### Strategy Observatory and measured performance (2026.10.17.1)
+The top navigation's Strategy Observatory opens the Research import panel. CSV columns must be exactly `source,strategy,kind,symbol,action,published_at,reported_price_usd`. Use timezone-qualified timestamps and `live`, `paper`, `backtest` or `unknown` labels (all remain unverified). Import at most 100 rows and 90 KB per request. The store retains up to 10,000 observations; duplicates preserve discovery time. Export the full JSON record for analysis. This is an observation importer, not a connection to other traders' private accounts or an automatic trade copier. Only import data you have permission to use.
+
+Fresh saved account marks establish a baseline after import. Later price outcomes use first available marks at least 1h/24h/120h later; these are elapsed hours, not trading sessions. No extra quotes are purchased. Outcomes are underlying USD price moves, not strategy profits, and lack dividend/corporate-action adjustments. Missing coverage remains unmeasured. Internal comparison books retain their separate methodology.
+
+Overview now shows component versions, effective limits, return since measurement began, observed drawdown, exposure, daily last-successful valuations and available open-position price/FX attribution. Deposits issue performance units at the last measured NAV; earlier performance is not reconstructed. Historical entry FX gaps remain unknown. The existing SPY comparator is a separate prospective price-return comparison, not total return.
+
+After an update, restart the existing tunnel-client process to load the updated stdio monitor; its exported runtime key must be available in that Terminal session. Do not start a second competing tunnel daemon. The monitor reports its version and saved worker version separately. Component timestamps are not proof of continuous process health.

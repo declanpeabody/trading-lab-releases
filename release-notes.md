@@ -1,27 +1,11 @@
-# Release 2026.10.15.1 — five-holding free-plan monitoring
+2026.10.17.1 — Monitoring reliability and Strategy Observatory
 
-Pending review/release; not installed automatically.
+- Adds dashboard/worker versions, startup times and effective account limits. The read-only monitor reports its own version separately from saved worker progress. Restart the existing tunnel-client process after installing so its stdio monitor loads the new code. Saved progress is not a liveness guarantee.
+- Refreshes expired held-stock/FX quotes with at most two additional priority requests per cycle, then validates the entire snapshot again. The 120-second freshness threshold, request spacing and 500/700 local daily caps remain unchanged. Persistent stale or invalid data blocks decisions; retries are not guaranteed to succeed.
+- Starts unitised, cash-flow-adjusted return tracking at the first successful check after this update. Adds daily last-successful valuations, observed drawdown and invested exposure. Deposits issue units at the last measured NAV. No historical returns are invented and missing sessions are not interpolated.
+- Adds open-position USD price versus GBP FX attribution where entry FX was recorded; legacy gaps remain blank. Existing realised execution accounting and prospective SPY price benchmark remain separate with their existing limitations.
+- Adds a Strategy Observatory navigation tab and authenticated, CSRF-protected CSV import/export for owner-authorised or public strategy observations. Imports are user-supplied unverified claims, never executable orders. No paid subscriptions, external scraping or automatic strategy changes are added.
+- Observatory records publication and discovery time, preserves original records on duplicate imports, and measures later underlying USD price moves only from fresh saved account marks after discovery. 1h/24h/120h are elapsed-hour horizons, not trading sessions. Missing symbols stay unmeasured; no additional market-data requests are made. Outcomes exclude costs, FX, dividends and corporate-action adjustments and are not portfolio returns or SELL profits.
+- Existing internal concentration/confirmed-entry comparison portfolios remain opt-in, separate from active trading. Active five-holding, £1,000 purchase cap, £10,000 contributed paper funding settings remain unchanged. Earlier positions are not topped up.
 
-Adds £9,000 simulated funding once (£10,000 contributed capital), preserves holdings/history/losses and risk controls, and sets a £1,000 purchase cap with FIVE holding slots (supersedes the earlier 20-slot proposal). Existing positions are not topped up or forcibly sold.
-
-Worker waits five minutes after processing. Holdings and FX are checked first with the unchanged 120-second freshness ceiling. Once holdings exist, optional candidates, paper comparisons and history preparation run at most every 30 minutes; histories are limited to five per optional batch. Comparisons receive fewer observations. The 300-stock universe warms up more slowly. With no holdings, small history batches may run each cycle to prepare initial entries.
-
-Request spacing remains eight seconds, normal daily ceiling 500, holdings ceiling 700, and research subcap 50 outside regular hours. All optional requests additionally preserve six credits per remaining five-minute regular-session slot plus 30 recovery credits, including before the market opens. These are conservative local estimates, not the provider balance; another app using the key or repeated failures can still exhaust the allowance. No subscription change. Checks take processing time in addition to the five-minute wait.
-
-Legacy research simulations still use their own original capital, capacity and cadence; they do not replay this new monitoring schedule. Paper only. Publication requires explicit release approval.
-
-## Observation-only news and forum research
-
-Adds independently enabled BBC Business and Stockaholics RSS/Atom headline observations to the News panel. Matching covers explicit supported tickers and a small documented company-alias list. Source links, publication/first-seen timestamps, keyword catalyst flags, unverified-discussion labels and deduplicated named-author counts are shown. Not a full-article analyser, verified event calendar or statistical mention-spike detector. Reddit is not connected. Forum availability is unverified on the iMac; restricted sources remain visibly unavailable, without bypass attempts.
-
-Uses two fixed public feeds at most every 30 minutes, including across restarts; no market-data credits or paid AI calls. Response sizes, XML declarations and outbound/link hosts are bounded. Network/storage errors are isolated from trading. Existing SEC news settings and evidence remain separate. Enable the new feeds in News after installation.
-
-Records opportunistic 1h+/1d+ USD changes from the first subsequent fresh saved account quote; timestamps disclose delayed sampling. Missing symbols remain pending, with no additional price requests. These are unadjusted descriptive observations, not proof of predictive value. No rule rewriting, ranking changes or trade triggers. Retention 30 days / 5,000 observations; latest 100 displayed/exported in the feed section.
-
-## Trade-review improvements
-
-Execution records now commit atomically with ledger changes: quantity, quote and simulated fill, FX, modelled price/FX costs, signed cash flow, entry basis and realised GBP result. Existing positions carry their known basis forward; historical fills/FX are not invented. Funding additions are recorded separately. Dashboard and JSON export show the new records; private monitoring prefers authoritative fills over duplicate journal decisions.
-
-Skipped entries distinguish cash, capacity and buy controls, including research-only quotes. Daily optional SPY observations use at most one normal-budget request per trading date, paired with account/FX values no more than two minutes apart. Comparison starts prospectively and restarts on changed funding; SPY is a GBP price comparator excluding dividends/dealing costs, not a cost-matched total-return portfolio. It is sampled during the session, not necessarily at close.
-
-Adds concentration and confirmed-entry shadow books alongside baseline/allocation/filing guard. Concentration limits a declared technology/platform group to two holdings and rejects >0.8 pairwise correlation or missing aligned history. Confirmed entries require consecutive complete buy observations 15–60 minutes apart on the same day, at most two new entries each cycle. Exit rules are unchanged. Missing shared quotes freeze all trials; divergent holdings retain the six-slot limit. New comparisons remain opt-in; old books are preserved and paused until explicit restart. No automatic promotion to the active account. Corrects research-page capacity text to five active slots.
+Validation: focused regression tests for deposit-neutral returns and attribution reconciliation, duplicate and invalid imports, stale observation exclusion, forward-only baselines, component snapshots and bounded quote recovery; full regression suite and JavaScript syntax checks run before publication. Native iMac installation and external strategy-provider access are not verified by these tests.

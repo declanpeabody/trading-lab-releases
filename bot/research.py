@@ -555,3 +555,79 @@ class ReliableExperiments:
     def miss(self,*args,**kwargs):return self._call('miss',*args,**kwargs)
     def invalidate(self,*args,**kwargs):return self._call('invalidate',*args,**kwargs)
     def control(self,*args,**kwargs):return self._call('control',*args,**kwargs)
+
+
+class StrategyObservatory:
+    """User-supplied observations only: no network, strategy execution or ledger writes."""
+    lock=threading.RLock()
+    columns=('source','strategy','kind','symbol','action','published_at','reported_price_usd')
+    def __init__(self,directory):
+        self.path=Path(directory)/'strategy-observatory.sqlite3'
+
+    def connect(self):
+        import sqlite3
+        db=sqlite3.connect(self.path)
+        db.execute('CREATE TABLE IF NOT EXISTS observations(id TEXT PRIMARY KEY,body TEXT NOT NULL)')
+        return db
+
+    def import_csv(self,text,now=None):
+        import math,re
+        from contextlib import closing
+        now=now or datetime.now(timezone.utc)
+        if not isinstance(text,str) or len(text.encode())>90000:raise ValueError('CSV exceeds 90 KB')
+        reader=csv.DictReader(io.StringIO(text))
+        if reader.fieldnames!=list(self.columns):raise ValueError('Use the exact CSV template columns in order')
+        rows=list(reader)
+        if not 1<=len(rows)<=100:raise ValueError('Import 1 to 100 observations at a time')
+        prepared=[]
+        for row in rows:
+            if None in row or any(v is None for v in row.values()):raise ValueError('Invalid CSV row')
+            row={k:v.strip() for k,v in row.items()}
+            if any(not 1<=len(row[k])<=100 or any(ord(c)<32 for c in row[k]) for k in ('source','strategy')):raise ValueError('Source and strategy require 1–100 printable characters')
+            if row['kind'] not in ('live','paper','backtest','unknown'):raise ValueError('Kind must be live, paper, backtest or unknown; labels remain unverified')
+            if not re.fullmatch(r'[A-Z][A-Z0-9.]{0,9}',row['symbol']) or row['action'] not in ('BUY','SELL'):raise ValueError('Use a US stock symbol and BUY or SELL')
+            try:published=datetime.fromisoformat(row['published_at'].replace('Z','+00:00'))
+            except ValueError:raise ValueError('Invalid publication timestamp') from None
+            if published.tzinfo is None or published>now:raise ValueError('Publication timestamp needs a timezone and cannot be in the future')
+            price=None
+            if row['reported_price_usd']:
+                try:price=float(row['reported_price_usd'])
+                except ValueError:raise ValueError('Invalid reported price') from None
+                if not math.isfinite(price) or price<=0:raise ValueError('Reported price must be finite and positive')
+            row.update(published_at=published.astimezone(timezone.utc).isoformat(),reported_price_usd=price)
+            ident=hashlib.sha256(json.dumps([row[k] for k in ('source','strategy','symbol','action','published_at')]).encode()).hexdigest()
+            row.update(id=ident,first_seen=now.isoformat(),verification='User-supplied, unverified; not proof of an automated strategy',baseline=None,outcomes={})
+            prepared.append(row)
+        with self.lock,closing(self.connect()) as db,db:
+            existing=db.execute('SELECT COUNT(*) FROM observations').fetchone()[0]
+            new=sum(not db.execute('SELECT 1 FROM observations WHERE id=?',(r['id'],)).fetchone() for r in {r['id']:r for r in prepared}.values())
+            if existing+new>10000:raise ValueError('Observation store is full (10,000); export before starting another study')
+            for row in prepared:db.execute('INSERT OR IGNORE INTO observations VALUES (?,?)',(row['id'],json.dumps(row,allow_nan=False)))
+        return new
+
+    def observe(self,account,now=None):
+        import math
+        from contextlib import closing
+        now=now or datetime.now(timezone.utc)
+        if account.get('error'):return
+        try:
+            at=datetime.fromisoformat(account['last_success'])
+            if at.tzinfo is None or not 0<=(now-at).total_seconds()<=120:return
+        except (KeyError,TypeError,ValueError):return
+        with self.lock,closing(self.connect()) as db,db:
+            for ident,body in db.execute('SELECT id,body FROM observations').fetchall():
+                row=json.loads(body);price=account.get('marks',{}).get(row['symbol'])
+                if type(price) not in (int,float) or not math.isfinite(price) or price<=0:continue
+                if at<=datetime.fromisoformat(row['first_seen']):continue
+                if row['baseline'] is None:row['baseline']={'at':at.isoformat(),'price_usd':price}
+                elapsed=(at-datetime.fromisoformat(row['baseline']['at'])).total_seconds()
+                for label,seconds in (('1h',3600),('24h',86400),('120h',432000)):
+                    if elapsed>=seconds and label not in row['outcomes']:
+                        row['outcomes'][label]={'at':at.isoformat(),'price_usd':price,'elapsed_hours':elapsed/3600,'price_return_pct':100*(price/row['baseline']['price_usd']-1)}
+                db.execute('UPDATE observations SET body=? WHERE id=?',(json.dumps(row,allow_nan=False),ident))
+
+    def state(self):
+        from contextlib import closing
+        with self.lock,closing(self.connect()) as db:
+            rows=[json.loads(r[0]) for r in db.execute('SELECT body FROM observations ORDER BY rowid DESC')]
+        return {'records':rows,'total':len(rows),'note':'Imported claims remain unverified. No automatic subscriptions or copied orders. Baselines use the first fresh saved account mark AFTER import, never the reported entry price. Outcomes are underlying USD price moves, not strategy returns or SELL profits; exclude costs, dividends and FX, and are not corporate-action adjusted. Horizons are elapsed hours, not trading sessions; the first available later mark may be much later. Uncovered stocks remain unmeasured. Internal comparison books are shown separately under Research comparisons.'}
