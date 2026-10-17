@@ -184,9 +184,28 @@ class RankedScanner(Scanner):
                 try:fetch(symbol,True)
                 except (ValueError,KeyError,TypeError) as exc:
                     raise ValueError(f'Held stock {symbol}: {exc}; decisions blocked this cycle.') from None
-            fetch('USD/GBP',True);stamp=self.timestamp()
+            fetch('USD/GBP',True)
+            # At most two extra requests, charged to the same held-position budget.
+            # Refresh only stale timestamps, never hide identity/session failures.
+            refreshed=set()
+            for attempt in range(3):
+                stamp=self.timestamp();stale=[]
+                for symbol in held+['USD/GBP']:
+                    try:validate(symbol,stamp)
+                    except ValueError:
+                        try:age=stamp-float(raw[symbol].get('last_quote_at') or raw[symbol].get('timestamp',0))
+                        except (TypeError,ValueError):raise
+                        if age>120 and symbol not in refreshed:stale.append((age,symbol))
+                        else:raise
+                if not stale:break
+                if attempt==2:raise ValueError('Held quotes remain stale after bounded refresh; decisions blocked this cycle.')
+                symbol=max(stale)[1];fetch(symbol,True);refreshed.add(symbol)
+            # Recheck the entire snapshot together after the final request.
+            stamp=self.timestamp()
             for symbol in held:prices[symbol]=validate(symbol,stamp)
             fx=validate('USD/GBP',stamp)
+            for symbol in held+['USD/GBP']:self.status.get('quote_failures',{}).pop(symbol,None)
+            self.status['held_quote_refreshes']=sorted(refreshed)
             if not session_window(self.now('America/New_York')):raise ValueError('Session ended; no decisions this cycle.')
             at=self.now('UTC').isoformat();self.audit['at']=at
             self.audit['decisions']=ledger.cycle(prices,{s:[float(r['close']) for r in bars[s]] for s in held},

@@ -201,4 +201,21 @@ class DashboardTests(unittest.TestCase):
                     self.assertNotIn('51,850.31',body)
                     self.assertNotIn('src="https://s3.tradingview.com',body)
 
+
+    def test_observatory_requires_auth_csrf_and_preserves_account(self):
+        with patch.dict('os.environ',{'DATA_DIR':self.temp.name}):
+            with self.assertRaises(HTTPError) as err:self.get('/api/observatory',False)
+            self.assertEqual(err.exception.code,401)
+            with self.get('/api/state') as r:token=json.load(r)['csrf']
+            before=self.ledger.read()
+            csv='source,strategy,kind,symbol,action,published_at,reported_price_usd\nOwner,Trend,paper,AAPL,BUY,2026-10-01T14:00:00Z,100'
+            headers={'Authorization':self.auth,'Content-Type':'application/json'}
+            request=lambda:Request(self.base+'/api/observatory',data=json.dumps({'csv':csv}).encode(),headers=headers)
+            with self.assertRaises(HTTPError) as err:urlopen(request(),timeout=2)
+            self.assertEqual(err.exception.code,403)
+            headers['X-CSRF-Token']=token
+            with urlopen(request(),timeout=2) as r:self.assertEqual(r.status,200)
+            with self.get('/api/observatory') as r:self.assertEqual(json.load(r)['total'],1)
+            self.assertEqual(self.ledger.read(),before)
+
 if __name__ == '__main__': unittest.main()
