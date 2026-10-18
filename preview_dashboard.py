@@ -9,3 +9,8 @@ for sym,qty,price in [('MSFT',.484311,525.45),('ABBV',.935654,285.34),('AAPL',.7
  state['positions'][sym]={'qty':qty,'cost_gbp':200,'entry_usd':price*1.02};state['marks'][sym]=price
 for day,ret in [(12,0),(13,.12),(14,-.21),(15,-.16),(16,-.36)]:state['accounting']['performance']['daily'].append({'at':f'2026-10-{day}T19:43:55Z','return_pct':ret,'equity_gbp':10000*(1+ret/100),'cash_gbp':9000})
 Path('/tmp/overview18-fixture.json').write_text(json.dumps(state))
+state['components']['dashboard_version']=state['components']['worker_version']='2026.10.18.2'
+state['session_scorecard']={'note':'Synthetic session fixture','sessions':[{'day':'2026-10-16','attempts':12,'successful':10,'success_pct':83.33,'quote_failures':1,'unfinished':1,'longest_success_gap_minutes':10}]}
+state['accounting']['closed_reviews']=[{'symbol':'TEST','reason':'Trend exit','realised_pnl_gbp':5,'at':'2026-10-16T15:00:00Z','entry_at':'2026-10-15T15:00:00Z','entry_basis_usd':100,'entry_evidence':{'quote_usd':99.75,'sma20':98,'sma50':96},'trade_review':{'low_usd':99,'high_usd':110,'observations':12,'partial':False}}]
+Path('/tmp/overview18-fixture.json').write_text(json.dumps(state))
+Path('/tmp/research18.html').write_text(Path('bot/research.html').read_text().replace('__TOP_NAV__',top_navigation('/research','preview')).replace('__NONCE__','preview'))

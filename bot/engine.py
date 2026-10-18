@@ -165,6 +165,7 @@ class Ledger:
             pending=(p or {}).get('reconciliation')
             if not pending or pending['id']!=ident:raise ValueError('Reconciliation changed or was already applied. Refresh first.')
             p['qty']*=ratio;p['entry_usd']/=ratio
+            p.pop('trade_review',None)  # Restart observed extrema after confirmed basis change.
             if symbol in s['marks']:s['marks'][symbol]/=ratio
             p['basis_reference']=pending['reference'];p['basis_confirmed_day']=pending['day']
             del p['reconciliation']
@@ -237,6 +238,10 @@ class Ledger:
             ordered = list(s['positions']) + [k for k in symbols if k not in s['positions']]
             for symbol in ordered:
                 p = s['positions'].get(symbol)
+                if p:
+                    review=p.setdefault('trade_review',dict(partial=True,first_observed=stamp,observations=0,low_usd=prices[symbol],high_usd=prices[symbol]))
+                    review.update(observations=review['observations']+int(review.get('last_observed')!=stamp),last_observed=stamp,
+                        low_usd=min(review['low_usd'],prices[symbol]),high_usd=max(review['high_usd'],prices[symbol]))
                 action,reason="SKIP","No entry signal"
                 if p and (signals[symbol] == 'sell' or prices[symbol] <= p['entry_usd'] * (1-STOP_FRACTION)):
                     action,reason='SELL',('Observed price loss exit' if prices[symbol] <= p['entry_usd']*(1-STOP_FRACTION) else 'Trend exit')
@@ -250,7 +255,7 @@ class Ledger:
                         fx_cost_gbp=gross*(1-self.price_allowance)*self.fx_allowance,net_cash_gbp=proceeds,
                         cost_basis_gbp=p['cost_gbp'],realised_pnl_gbp=proceeds-p['cost_gbp'],
                         entry_at=p.get('opened'),entry_execution_id=p.get('execution_id'),entry_fx=p.get('entry_fx'),
-                        entry_basis_usd=p['entry_usd'],legacy_entry=p.get('execution_id') is None))
+                        trade_review=p.get('trade_review'),entry_evidence=p.get('entry_evidence'),entry_basis_usd=p['entry_usd'],legacy_entry=p.get('execution_id') is None))
                     del s['positions'][symbol]
                     # A stopped-out stock cannot be re-entered on the same day.
                     s['last_buy'][symbol] = date
@@ -260,7 +265,7 @@ class Ledger:
                       and not s['risk_latched'] and not s['day_block']
                       and s['last_buy'].get(symbol) != date):
                     unit_cost = prices[symbol] * (1+self.price_allowance) * fx * (1+self.fx_allowance)
-                    budget = min(purchase_limit, getattr(self,'purchase_cap',MAX_POSITION), s['cash'])
+                    budget = min(purchase_limit, getattr(self,'purchase_cap',MAX_POSITION), s['cash'],getattr(self,'research_caps',{}).get(symbol,purchase_limit))
                     qty = math.floor(budget / unit_cost * 1_000_000) / 1_000_000
                     cost = qty * unit_cost
                     if qty <= 0 or cost < 1:
@@ -272,6 +277,8 @@ class Ledger:
                     s['cash'] -= cost
                     s['positions'][symbol] = dict(qty=qty, cost_gbp=cost,
                         entry_usd=prices[symbol]*(1+self.price_allowance), opened=stamp)
+                    s['positions'][symbol]['entry_evidence']=dict(quote_usd=prices[symbol],sma20=sum(histories[symbol][-20:])/20,sma50=sum(histories[symbol][-50:])/50,signal=signals[symbol],news_used=False)
+                    s['positions'][symbol]['trade_review']=dict(partial=False,first_observed=stamp,last_observed=stamp,observations=1,low_usd=prices[symbol],high_usd=prices[symbol])
                     if history_rows is not None:
                         row=history_rows[symbol][-1]
                         s['positions'][symbol]['basis_reference']={'day':row['datetime'][:10],'close':positive(row['close'])}
@@ -282,7 +289,7 @@ class Ledger:
                         fx_gbp_per_usd=fx,price_allowance=self.price_allowance,fx_allowance=self.fx_allowance,
                         gross_gbp=gross,price_cost_gbp=gross*self.price_allowance,
                         fx_cost_gbp=gross*(1+self.price_allowance)*self.fx_allowance,net_cash_gbp=-cost,
-                        cost_basis_gbp=cost,realised_pnl_gbp=None))
+                        cost_basis_gbp=cost,realised_pnl_gbp=None,entry_evidence=s['positions'][symbol]['entry_evidence']))
                     s['last_buy'][symbol] = date
                     messages.append(f'PAPER BUY {symbol}: {qty:.6f} shares, £{cost:.2f} including modelled costs.')
                 else:
@@ -324,7 +331,7 @@ class Ledger:
                         entry_cost_residual_gbp=p['qty']*p['entry_usd']*entry_fx-p['cost_gbp'])
                 positions.append(row)
             invested=state['equity']-state['cash']
-            return dict(open_attribution=positions,exposure_pct=100*invested/state['equity'] if state['equity']>0 else None,
+            return dict(closed_reviews=[e for e in executions if e['side']=='SELL'],open_attribution=positions,exposure_pct=100*invested/state['equity'] if state['equity']>0 else None,
                 performance=state.get('performance'),executions=executions,funding=funding,recorded_executions=summary[0],recorded_realised_gbp=summary[1],recorded_modelled_costs_gbp=summary[2],
                 note='Complete execution records start with this update. Earlier trades are not reconstructed. Recorded realised profit and costs cover these records only; deposits are not profit. Execution costs are assumptions, not broker charges.')
 

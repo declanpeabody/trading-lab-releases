@@ -1,11 +1,10 @@
-2026.10.18.1 — Portfolio-first Overview
+2026.10.18.2 — Reliability and research evidence
 
-- Redesigned Overview around total account value, cash, holding count, a recorded-performance chart, allocation and a compact holdings table.
-- Recent activity and Why no trade? are collapsed by default. Opening them is preserved during polling. Current errors, data age, risk warnings and trading controls stay visible.
-- New Reports tab contains detailed performance, attribution, execution accounting and benchmark information. Diagnostics contains data testing, request budget and private monitoring controls.
-- Return / Value chart uses only recorded daily observations. Return uses existing deposit-adjusted measurement; account value includes deposits. Empty and single-observation histories do not invent a trend. Lines connect observations, not measured intraday prices.
-- Responsive dark layout, native keyboard-accessible disclosures and text labels for gains/losses. All figures remain simulated saved valuations, not streaming quotes.
-- No changes to trading rules, account funding, position limits or market-data requests.
+- Diagnostics adds a durable session reliability scorecard: recorded attempts, successful account checks, quote failures, unfinished checks and gaps between successful cycle starts. Not an uptime guarantee; request use remains in the budget panel.
+- Reports adds closed-trade reviews with entry trend evidence, holding duration, realised GBP profit/loss and sampled USD price excursions. Missing legacy observations remain unknown; confirmed splits restart the observation range as partial. Execution exports include the evidence.
+- Opt-in comparisons add individually volatility-sized entries, a supplied-history breadth filter and a 48-hour manually recorded event guard. They use shared snapshots and the existing request allowance. Breadth is not a broad-market index; event coverage is unverified and incomplete.
+- Research adds a manual event calendar with source URLs, timezone validation and first-seen timestamps. No automatic news or earnings feed, no source fetching and no active news-based decisions.
+- Comparison review criteria show minimum sample, after-cost baseline, drawdown and coverage gates. Independent holdout review and explicit approval remain required; no automatic promotion of these models.
+- Existing comparison books are preserved and paused when models change. Explicit Restart comparison is needed to start comparable new books. Active capital, five slots, £1,000 cap, trading rules and API limits stay unchanged.
 
-Design references: official Trading 212 portfolio overview and Interactive Brokers Client Portal overview documentation (account balances, performance, allocation and holdings).
-Validation: dashboard server tests, JavaScript syntax and Python compilation; GitHub full regression and desktop/mobile browser checks required before publication. Browser fixtures are synthetic and never included as account history.
+Validation: focused regression tests, Python/JavaScript checks, full GitHub tests and desktop/mobile dashboard browser checks before publication.
