@@ -4,6 +4,7 @@ from datetime import datetime,timedelta,timezone
 from unittest.mock import patch
 from research import StrategyObservatory
 from engine import Ledger
+from version import VERSION
 from app import saved_worker,persist_worker
 from test_universe import LargeMarket
 from test_scanner import NOW
@@ -50,7 +51,7 @@ class ObservatoryReleaseTests(unittest.TestCase):
    self.assertEqual(len(l.read()['performance']['daily']),2);l.db.close()
  def test_worker_version_survives_disk_snapshot(self):
   with tempfile.TemporaryDirectory() as root,patch.dict('os.environ',{'DATA_DIR':root}):
-   persist_worker();s=saved_worker(root);self.assertEqual(s['version'],'2026.10.17.1');self.assertTrue(s['started_at'])
+   persist_worker();s=saved_worker(root);self.assertEqual(s['version'],VERSION);self.assertTrue(s['started_at'])
  def test_stale_held_quote_refresh_is_bounded(self):
   with tempfile.TemporaryDirectory() as root:
    l=Ledger(Path(root)/'paper.sqlite3');l.control('start');m=LargeMarket();scanner=RankedScanner(root,m)

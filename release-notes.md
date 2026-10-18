@@ -1,11 +1,11 @@
-2026.10.17.1 — Monitoring reliability and Strategy Observatory
+2026.10.18.1 — Portfolio-first Overview
 
-- Adds dashboard/worker versions, startup times and effective account limits. The read-only monitor reports its own version separately from saved worker progress. Restart the existing tunnel-client process after installing so its stdio monitor loads the new code. Saved progress is not a liveness guarantee.
-- Refreshes expired held-stock/FX quotes with at most two additional priority requests per cycle, then validates the entire snapshot again. The 120-second freshness threshold, request spacing and 500/700 local daily caps remain unchanged. Persistent stale or invalid data blocks decisions; retries are not guaranteed to succeed.
-- Starts unitised, cash-flow-adjusted return tracking at the first successful check after this update. Adds daily last-successful valuations, observed drawdown and invested exposure. Deposits issue units at the last measured NAV. No historical returns are invented and missing sessions are not interpolated.
-- Adds open-position USD price versus GBP FX attribution where entry FX was recorded; legacy gaps remain blank. Existing realised execution accounting and prospective SPY price benchmark remain separate with their existing limitations.
-- Adds a Strategy Observatory navigation tab and authenticated, CSRF-protected CSV import/export for owner-authorised or public strategy observations. Imports are user-supplied unverified claims, never executable orders. No paid subscriptions, external scraping or automatic strategy changes are added.
-- Observatory records publication and discovery time, preserves original records on duplicate imports, and measures later underlying USD price moves only from fresh saved account marks after discovery. 1h/24h/120h are elapsed-hour horizons, not trading sessions. Missing symbols stay unmeasured; no additional market-data requests are made. Outcomes exclude costs, FX, dividends and corporate-action adjustments and are not portfolio returns or SELL profits.
-- Existing internal concentration/confirmed-entry comparison portfolios remain opt-in, separate from active trading. Active five-holding, £1,000 purchase cap, £10,000 contributed paper funding settings remain unchanged. Earlier positions are not topped up.
+- Redesigned Overview around total account value, cash, holding count, a recorded-performance chart, allocation and a compact holdings table.
+- Recent activity and Why no trade? are collapsed by default. Opening them is preserved during polling. Current errors, data age, risk warnings and trading controls stay visible.
+- New Reports tab contains detailed performance, attribution, execution accounting and benchmark information. Diagnostics contains data testing, request budget and private monitoring controls.
+- Return / Value chart uses only recorded daily observations. Return uses existing deposit-adjusted measurement; account value includes deposits. Empty and single-observation histories do not invent a trend. Lines connect observations, not measured intraday prices.
+- Responsive dark layout, native keyboard-accessible disclosures and text labels for gains/losses. All figures remain simulated saved valuations, not streaming quotes.
+- No changes to trading rules, account funding, position limits or market-data requests.
 
-Validation: focused regression tests for deposit-neutral returns and attribution reconciliation, duplicate and invalid imports, stale observation exclusion, forward-only baselines, component snapshots and bounded quote recovery; full regression suite and JavaScript syntax checks run before publication. Native iMac installation and external strategy-provider access are not verified by these tests.
+Design references: official Trading 212 portfolio overview and Interactive Brokers Client Portal overview documentation (account balances, performance, allocation and holdings).
+Validation: dashboard server tests, JavaScript syntax and Python compilation; GitHub full regression and desktop/mobile browser checks required before publication. Browser fixtures are synthetic and never included as account history.

@@ -90,7 +90,7 @@ def worker(ledger):
 
 
 def top_navigation(path,nonce):
-    links=[('/#overview','Overview'),('/#positions','Positions'),('/#scanner','Scanner'),('/#markets','Markets'),
+    links=[('/#overview','Overview'),('/#positions','Positions'),('/#reports','Reports'),('/#diagnostics','Diagnostics'),('/#scanner','Scanner'),('/#markets','Markets'),
            ('/research','Research & Journal'),('/research#observatory','Strategy Observatory'),('/research#experiments','Strategy Experiments'),('/news','News'),('/#rules','Rules & Limits'),('/updates','Software Updates')]
     style='<style nonce="'+nonce+'">.top-nav{display:flex;flex-wrap:wrap;gap:8px;margin:20px 0;padding:0 0 16px;border-bottom:1px solid #2b3545}.top-nav a{display:inline-flex;align-items:center;min-height:44px;padding:10px 14px;border:1px solid #3f4d63;border-radius:7px;color:#c6d0df;background:#111925;text-decoration:none;font:600 13px system-ui}.top-nav a[aria-current]{color:#101620;background:#d8f36a;border-color:#d8f36a}.top-nav a:focus-visible{outline:3px solid #a8ceff;outline-offset:3px}</style>'
     return style+'<nav class="top-nav" aria-label="Dashboard navigation">'+''.join(

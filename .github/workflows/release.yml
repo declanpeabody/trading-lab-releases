@@ -28,6 +28,20 @@ jobs:
           python3 -m compileall -q .
       - name: Check browser scripts
         run: python3 build_release.py --check-js
+      - name: Check dashboard desktop and mobile interactions
+        run: |
+          npm install --prefix /tmp/trading-ui --ignore-scripts playwright@1.58.2
+          /tmp/trading-ui/node_modules/.bin/playwright install --with-deps chromium
+          python3 preview_dashboard.py
+          PLAYWRIGHT_MODULE=/tmp/trading-ui/node_modules/playwright node check_dashboard.cjs
+      - name: Save synthetic dashboard previews
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-previews
+          path: /tmp/overview18-*.png
+          if-no-files-found: ignore
+          retention-days: 7
   publish:
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     needs: test
