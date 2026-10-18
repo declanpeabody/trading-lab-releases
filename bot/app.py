@@ -9,13 +9,13 @@ import sqlite3
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from engine import Ledger
 from market import Market, session_window, validate_key, MarketUnavailable, ApiBudget, ConnectionTest
-from research import Research, Experiments, ShadowTrials, ReliableExperiments, StrategyObservatory
+from research import Research, Experiments, ShadowTrials, ReliableExperiments, StrategyObservatory, SessionScorecard, EventCalendar
 from ranked_scanner import RankedScanner, Journal
 from news import News, optional_news
 from updater import Updates
@@ -72,8 +72,17 @@ def worker(ledger):
                 directory=os.getenv('DATA_DIR','/data')
                 scanner=RankedScanner(directory,experiments=ReliableExperiments(directory))
             if not (Path(os.getenv('DATA_DIR','/data'))/'update_hold').exists() and not ledger.read()['paused'] and session_window(datetime.now(ZoneInfo('America/New_York'))):
-                try:scanner.cycle(ledger)
-                except ValueError as exc:ledger.fail(str(exc))
+                scorecard=None;check_id=None;before=ledger.read()
+                try:
+                    scorecard=SessionScorecard(directory);check_id=scorecard.begin(datetime.now(timezone.utc).isoformat())
+                except (OSError,ValueError,sqlite3.Error):pass
+                try:
+                    try:scanner.cycle(ledger)
+                    except ValueError as exc:ledger.fail(str(exc))
+                finally:
+                    if check_id is not None:
+                        try:scorecard.finish(check_id,datetime.now(timezone.utc).isoformat(),before,ledger.read())
+                        except (OSError,ValueError,sqlite3.Error):pass
                 scanner.record_status(ledger)
                 try:StrategyObservatory(directory).observe(ledger.read())
                 except (OSError,ValueError,sqlite3.Error):pass  # Optional research cannot block holdings.
@@ -181,10 +190,14 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
                 except (OSError,sqlite3.Error):state['request_budget']={'error':'Local request counter unavailable; check storage. No allowance estimate is available.'}
                 try:state['accounting']=ledger.accounting()
                 except (sqlite3.Error,OSError):state['accounting']={'error':'Execution accounting unavailable; no records reconstructed.'}
+                try:state['session_scorecard']=SessionScorecard(os.getenv('DATA_DIR','/data')).state()
+                except (OSError,ValueError,sqlite3.Error):state['session_scorecard']={'error':'Session scorecard unavailable; check local storage.'}
                 state['no_trade']=no_trade_reasons(state)
                 self.respond(200, json.dumps(state, allow_nan=False))
             elif self.path == '/api/accounting/export':
                 self.respond(200,json.dumps(ledger.accounting(100000),allow_nan=False),extra={'Content-Disposition':'attachment; filename="paper-executions.json"'})
+            elif self.path == '/api/calendar':
+                self.respond(200,json.dumps(EventCalendar(os.getenv('DATA_DIR','/data')).state(),allow_nan=False))
             elif self.path == '/api/observatory':
                 self.respond(200,json.dumps(StrategyObservatory(os.getenv('DATA_DIR','/data')).state(),allow_nan=False))
             elif self.path == '/api/trials':
@@ -223,7 +236,7 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
 
         def do_POST(self):
             if not self.authorized(): return
-            if self.path not in ('/api/control', '/api/research', '/api/news', '/api/updates', '/api/experiments', '/api/connection-test', '/api/monitoring', '/api/trials', '/api/observatory'):
+            if self.path not in ('/api/control', '/api/research', '/api/news', '/api/updates', '/api/experiments', '/api/connection-test', '/api/monitoring', '/api/trials', '/api/observatory', '/api/calendar'):
                 self.respond(404, '{"error":"Not found"}')
                 return
             if not hmac.compare_digest(self.headers.get('X-CSRF-Token',''),csrf):
@@ -244,6 +257,10 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
                     research.start(payload)
                 elif self.path == '/api/observatory':
                     StrategyObservatory(os.getenv('DATA_DIR','/data')).import_csv(payload['csv'])
+                elif self.path == '/api/calendar':
+                    calendar=EventCalendar(os.getenv('DATA_DIR','/data'))
+                    if payload.get('action')=='remove':calendar.remove(payload)
+                    else:calendar.add(payload)
                 elif self.path == '/api/trials':
                     ShadowTrials(os.getenv('DATA_DIR','/data')).control(payload.get('action'),payload.get('enabled'))
                 elif self.path == '/api/news' and news:

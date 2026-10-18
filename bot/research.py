@@ -1,5 +1,6 @@
 """Background research jobs; separate files from the active paper account."""
 import csv
+from contextlib import contextmanager, closing
 from datetime import datetime, timedelta, timezone
 import hashlib
 import io
@@ -366,7 +367,7 @@ class Experiments:
 
 class ShadowTrials:
     """Prospective, opt-in comparisons. No promotion or active-ledger reference."""
-    NAMES=('baseline','allocation','filing_guard','concentration','confirmed_entry')
+    NAMES=('baseline','allocation','filing_guard','concentration','confirmed_entry','volatility_size','trend_breadth','event_guard')
     def __init__(self,directory):
         import sqlite3
         self.directory=Path(directory);self.path=self.directory/'shadow-trials.sqlite3'
@@ -394,8 +395,15 @@ class ShadowTrials:
     def state(self):
         import sqlite3
         with sqlite3.connect(self.path) as db:s=json.loads(db.execute('SELECT body FROM trials WHERE id=1').fetchone()[0])
-        return s|{'metrics':{k:experiment_metrics(b,[],s['closes'][k]) for k,b in s['books'].items()},
-            'note':'Prospective shared-data paper comparisons, never promoted automatically. Baseline: £200 cap. Allocation: £5 modelled price-risk budget, £150 cap, £200 cash reserve, two new entries per cycle and 0.8 positive correlation filter. Filing guard: £200 cap, requires SEC coverage within one hour and defers entries with a risk-coded filing first seen within seven days. This is not a news sentiment model. No coverage means no filing-guard buy. All accounts freeze together on missing holdings data. Returns include modelled exit costs; gaps can exceed the modelled risk budget. Concentration: £200 cap, at most two of AAPL/MSFT/AMZN/GOOGL/GOOG/META/NVDA/TSLA plus pairwise correlation ≤0.8; unknown/misaligned histories defer entry. Confirmed entry: buy signal on consecutive complete observations 15–60 minutes apart on the same day, at most two new entries per cycle. Entry filters only; original exits retained. These £1,000/£200 books do not represent the £10,000 active allocation. No claim of statistical significance.'}
+        metrics={k:experiment_metrics(b,[],s['closes'][k]) for k,b in s['books'].items()}
+        baseline=metrics['baseline']
+        gates={k:dict(sessions=len(s['days'])>=60,closed_trades=min(m['closed_trades'],baseline['closed_trades'])>=30,
+            after_cost_outperformance=m['return_pct']>baseline['return_pct'],drawdown_no_worse=m['drawdown_pct']<=baseline['drawdown_pct'],
+            coverage=s['checks']>=1 and s['misses']/max(1,s['checks']+s['misses'])<=.1,
+            independent_holdout_verified=False,eligible_for_promotion=False) for k,m in metrics.items() if k!='baseline'}
+        return s|{'metrics':metrics,'review_gates':gates,
+            'review_note':'Screening thresholds: 60 observed sessions, 30 closed trades in each book, positive after-cost advantage, no worse observed drawdown and ≤10% missed snapshots. These are minimum review criteria, not statistical proof. Independent holdout review and explicit approval are always required; no automatic promotion.',
+            'note':'Prospective shared-data paper comparisons, never promoted automatically. Baseline: £200 cap. Allocation: £5 modelled price-risk budget, £150 cap, £200 cash reserve, two new entries per cycle and 0.8 positive correlation filter. Filing guard: £200 cap, requires SEC coverage within one hour and defers entries with a risk-coded filing first seen within seven days. This is not a news sentiment model. No coverage means no filing-guard buy. All accounts freeze together on missing holdings data. Returns include modelled exit costs; gaps can exceed the modelled risk budget. Concentration: £200 cap, at most two of AAPL/MSFT/AMZN/GOOGL/GOOG/META/NVDA/TSLA plus pairwise correlation ≤0.8; unknown/misaligned histories defer entry. Confirmed entry: buy signal on consecutive complete observations 15–60 minutes apart on the same day, at most two new entries per cycle. Entry filters only; original exits retained. These £1,000/£200 books do not represent the £10,000 active allocation. Volatility size: each entry capped at £5 divided by twice daily volatility (1% floor), maximum £200. Trend breadth: requires 30 aligned supplied histories, with at least 60% above their 50-session mean; this is partial scanner coverage, not a broad-market index. Event guard: defers entries within 48 hours before manually recorded events; missing calendar coverage remains unknown. No claim of statistical significance.'}
     def control(self,action,enabled=None):
         def update(s):
             if action=='enabled' and type(enabled) is bool:
@@ -461,6 +469,22 @@ class ShadowTrials:
                         if len(selected)==2:break
                     cap=min([150]+[5/max(.05,2*assess(bars[x])['volatility_pct']/100) for x in selected])
                     chosen=selected[:max(0,int((body['cash']-200)//cap))]
+                elif name=='volatility_size':
+                    ledger.research_caps={x:max(1,min(200,int(5/max(.02,2*assess(bars[x])['volatility_pct']/100)))) for x in chosen}
+                elif name=='trend_breadth':
+                    grids={tuple(r['datetime'] for r in rows) for rows in bars.values() if len(rows)==50}
+                    usable=[rows for rows in bars.values() if len(rows)==50]
+                    fraction=sum(float(rows[-1]['close'])>sum(float(r['close']) for r in rows)/50 for rows in usable)/len(usable) if usable else 0
+                    s['breadth_observation']=dict(at=stamp,histories=len(usable),above_mean_fraction=fraction,aligned=len(grids)==1)
+                    if len(usable)<30 or len(grids)!=1 or fraction<.6:
+                        actions.extend(dict(model=name,symbol=x,action='SKIP',reason='Supplied-history breadth insufficient, misaligned or below 60%') for x in chosen);chosen=[]
+                elif name=='event_guard':
+                    allowed=[]
+                    for x in chosen:
+                        deferred=EventCalendar(self.directory).upcoming(x,stamp)
+                        actions.append(dict(model=name,symbol=x,action='REVIEW',reason='Event within 48 hours; entry deferred' if deferred else 'No recorded imminent event; coverage unverified'))
+                        if not deferred:allowed.append(x)
+                    chosen=allowed
                 elif name=='concentration':
                     group={'AAPL','MSFT','AMZN','GOOGL','GOOG','META','NVDA','TSLA'}
                     allowed=[]
@@ -631,3 +655,71 @@ class StrategyObservatory:
         with self.lock,closing(self.connect()) as db:
             rows=[json.loads(r[0]) for r in db.execute('SELECT body FROM observations ORDER BY rowid DESC')]
         return {'records':rows,'total':len(rows),'note':'Imported claims remain unverified. No automatic subscriptions or copied orders. Baselines use the first fresh saved account mark AFTER import, never the reported entry price. Outcomes are underlying USD price moves, not strategy returns or SELL profits; exclude costs, dividends and FX, and are not corporate-action adjusted. Horizons are elapsed hours, not trading sessions; the first available later mark may be much later. Uncovered stocks remain unmeasured. Internal comparison books are shown separately under Research comparisons.'}
+
+
+class SessionScorecard:
+    """Durable local check observations; never infers uptime outside recorded checks."""
+    def __init__(self,directory):
+        self.path=Path(directory)/'session-scorecard.sqlite3'
+        self.path.parent.mkdir(parents=True,exist_ok=True)
+    @contextmanager
+    def connect(self):
+        import sqlite3
+        with closing(sqlite3.connect(self.path,timeout=2)) as db, db:
+            db.execute('CREATE TABLE IF NOT EXISTS checks(id INTEGER PRIMARY KEY,started TEXT,finished TEXT,success INTEGER,error TEXT)')
+            yield db
+    def begin(self,at):
+        with self.connect() as db:
+            ident=db.execute('INSERT INTO checks(started) VALUES(?)',(at,)).lastrowid
+            db.execute('DELETE FROM checks WHERE id < ?',(ident-20000,))
+            return ident
+    def finish(self,ident,at,before,after):
+        success=bool(after.get('last_success') and after.get('last_success')!=before.get('last_success'))
+        with self.connect() as db:
+            db.execute('UPDATE checks SET finished=?,success=?,error=? WHERE id=?',(at,int(success),str(after.get('error') or '')[:500],ident))
+    def state(self):
+        from zoneinfo import ZoneInfo
+        groups={}
+        with self.connect() as db:rows=db.execute('SELECT started,finished,success,error FROM checks ORDER BY id').fetchall()
+        for start,end,success,error in rows:
+            day=datetime.fromisoformat(start).astimezone(ZoneInfo('America/New_York')).date().isoformat()
+            g=groups.setdefault(day,dict(day=day,attempts=0,successful=0,unfinished=0,quote_failures=0,successful_times=[],last_error=None))
+            g['attempts']+=1;g['successful']+=int(bool(success));g['unfinished']+=int(end is None)
+            if success:g['successful_times'].append(start)
+            if error:g['last_error']=error
+            if error and ('quote' in error.lower() or 'stale' in error.lower()):g['quote_failures']+=1
+        for g in groups.values():
+            times=g.pop('successful_times');g['longest_success_gap_minutes']=max([(datetime.fromisoformat(b)-datetime.fromisoformat(a)).total_seconds()/60 for a,b in zip(times,times[1:])],default=None)
+            g['success_pct']=100*g['successful']/g['attempts']
+        return dict(sessions=list(groups.values())[-30:],note='Recorded cycles only, grouped by New York date. Unfinished means running or interrupted. Gaps measure successful cycle start times, exclude unobserved time before/after, and do not prove continuous monitoring. Request usage is shown in the existing budget panel.')
+
+
+class EventCalendar:
+    """User-supplied upcoming events, never fetched or treated as verified coverage."""
+    def __init__(self,directory):self.path=Path(directory)/'research-events.sqlite3'
+    @contextmanager
+    def connect(self):
+        import sqlite3
+        self.path.parent.mkdir(parents=True,exist_ok=True)
+        with closing(sqlite3.connect(self.path,timeout=3)) as db, db:
+            db.execute('CREATE TABLE IF NOT EXISTS events(symbol TEXT,at TEXT,source TEXT,seen TEXT,PRIMARY KEY(symbol,at))')
+            yield db
+    def remove(self,payload):
+        with self.connect() as db:db.execute('DELETE FROM events WHERE symbol=? AND at=?',(str(payload.get('symbol','')),str(payload.get('at',''))))
+    def add(self,payload,now=None):
+        import re
+        from urllib.parse import urlsplit
+        symbol=str(payload.get('symbol','')).strip().upper();at=datetime.fromisoformat(str(payload.get('at','')).replace('Z','+00:00'))
+        now=now or datetime.now(timezone.utc);source=str(payload.get('source','')).strip();url=urlsplit(source)
+        if not re.fullmatch(r'[A-Z][A-Z0-9.-]{0,9}',symbol) or at.tzinfo is None or not now<at<=now+timedelta(days=366):raise ValueError('Provide a stock symbol and a future event time with timezone, within one year.')
+        if len(source)>500 or url.scheme!='https' or not url.hostname or url.username or url.password:raise ValueError('Provide an HTTPS source URL without credentials.')
+        with self.connect() as db:
+            db.execute('DELETE FROM events WHERE at < ?',((now-timedelta(days=30)).isoformat(),))
+            if db.execute('SELECT COUNT(*) FROM events').fetchone()[0]>=1000:raise ValueError('Calendar limit reached.')
+            db.execute('INSERT OR IGNORE INTO events VALUES(?,?,?,?)',(symbol,at.astimezone(timezone.utc).isoformat(),source,now.isoformat()))
+    def state(self):
+        with self.connect() as db:rows=db.execute('SELECT symbol,at,source,seen FROM events ORDER BY at DESC LIMIT 1000').fetchall()
+        return dict(events=[dict(zip(('symbol','at','source','first_seen'),r)) for r in rows],note='Manually recorded, unverified events. No automatic earnings feed; absent events mean unknown coverage. Source URLs are not fetched. Research only, active trades unchanged.')
+    def upcoming(self,symbol,stamp):
+        at=datetime.fromisoformat(stamp)
+        return any(e['symbol']==symbol and datetime.fromisoformat(e['first_seen'])<=at and timedelta(0)<=datetime.fromisoformat(e['at'])-at<=timedelta(hours=48) for e in self.state()['events'])
