@@ -175,6 +175,14 @@ class RankedScanner(Scanner):
         limit=1000 if expanded else self.experiments.active_limit() if self.experiments else 200
         self.status['active_purchase_limit']=limit
 
+        def observe_signals(prices,at):
+            try:
+                from research import ResearchSignals
+                ResearchSignals(self.directory).observe(prices,bars,at,self.audit.get('decisions',[]),now=self.now('UTC'))
+                self.status.pop('signals_error',None)
+            except Exception:
+                self.status['signals_error']='Research signals unavailable; active account check preserved.'
+
         def fetch(symbol,priority=False):
             q=self.market.get('quote',priority=priority,symbol=symbol,**(
                 {} if symbol=='USD/GBP' else {'exchange':mapping[symbol],'prepost':'false'}))
@@ -230,6 +238,7 @@ class RankedScanner(Scanner):
             self.audit['prices']=dict(prices);self.status['checked']=list(prices)
             self.status['holdings_checked_at']=at
             if ledger.read().get('error'):return
+            observe_signals(prices,at)
 
         # Five-holding free-plan profile: protect frequent mandatory checks.
         # Persist the optional-stage timestamp so restarts do not spend another batch.
@@ -311,6 +320,7 @@ class RankedScanner(Scanner):
                         previous={d['symbol']:d for d in self.audit['decisions']}
                         previous.update({d['symbol']:d for d in actions});self.audit['decisions']=list(previous.values())
                     self.audit['prices'].update(prices);self.status['checked']=list(self.audit['prices'])
+                    observe_signals(prices,at)
                     if self.experiments and not ledger.read().get('error') and not ledger.read()['paused']:
                         self.experiments.observe(prices,bars,fx,today,at,entry_symbols,buy_block=live['buy_block'])
                         if not expanded:self.experiments.promote(ledger,today)

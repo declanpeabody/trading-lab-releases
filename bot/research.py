@@ -667,6 +667,109 @@ class StrategyObservatory:
         return {'records':rows,'total':len(rows),'note':'Imported claims remain unverified. No automatic subscriptions or copied orders. Baselines use the first fresh saved account mark AFTER import, never the reported entry price. Outcomes are underlying USD price moves, not strategy returns or SELL profits; exclude costs, dividends and FX, and are not corporate-action adjusted. Horizons are elapsed hours, not trading sessions; the first available later mark may be much later. Uncovered stocks remain unmeasured. Internal comparison books are shown separately under Research comparisons.'}
 
 
+class ResearchSignals:
+    """Prospective, bounded evidence journal. No network or active ledger writes."""
+    lock=threading.RLock()
+    def __init__(self,directory):
+        self.directory=Path(directory);self.path=self.directory/'research-signals.sqlite3'
+
+    def connect(self):
+        import sqlite3
+        db=sqlite3.connect(self.path,timeout=1)
+        db.execute('CREATE TABLE IF NOT EXISTS signals(id TEXT PRIMARY KEY,body TEXT NOT NULL)')
+        return db
+
+    @staticmethod
+    def time(value):
+        result=datetime.fromisoformat(value.replace('Z','+00:00'))
+        if result.tzinfo is None:raise ValueError('Timezone required')
+        return result.astimezone(timezone.utc)
+
+    def sources(self):
+        import sqlite3
+        rows=[];errors=[]
+        for path,table,kind in ((self.directory/'feed-observations.sqlite3','observations','feed'),(self.directory/'news'/'events.sqlite3','events','filing')):
+            if not path.exists():continue
+            try:
+                with closing(sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True,timeout=1)) as db:
+                    for body, in db.execute(f'SELECT body FROM {table} ORDER BY rowid DESC LIMIT 500'):
+                        item=json.loads(body);item['_kind']=kind;rows.append(item)
+            except (sqlite3.Error,ValueError):errors.append(kind+' source storage unavailable')
+        return rows,errors
+
+    def observe(self,prices,bars,stamp,decisions=(),now=None):
+        import math
+        from zoneinfo import ZoneInfo
+        now=now or datetime.now(timezone.utc);at=self.time(stamp)
+        if not 0<=(now-at).total_seconds()<=120:return
+        prices={s:p for s,p in prices.items() if type(p) in (int,float) and math.isfinite(p) and p>0}
+        day=at.astimezone(ZoneInfo('America/New_York')).date().isoformat()
+        actions={d['symbol']:d.get('action') for d in decisions}
+        prepared=[]
+        for symbol,price in prices.items():
+            try:
+                closes=[float(r['close']) for r in bars[symbol]]
+                if len(closes)<50 or any(not math.isfinite(p) or p<=0 for p in closes):continue
+                for name,short,long in (('trend_20_50',20,50),('faster_10_30',10,30)):
+                    fast=sum(closes[-short:])/short;slow=sum(closes[-long:])/long
+                    direction='BUY' if price>fast>slow else 'SELL' if price<fast else 'HOLD'
+                    prepared.append({'id':f'{name}:{symbol}:{day}','symbol':symbol,'module':name,'direction':direction,
+                        'first_seen':stamp,'published_at':stamp,'source':'Shared scanner snapshot','source_url':None,
+                        'evidence':{'price_usd':price,'short_mean':fast,'long_mean':slow,'history_end':bars[symbol][-1].get('datetime')},
+                        'active_action':actions.get(symbol,'Not evaluated'),'baseline':{'at':stamp,'price_usd':price},'outcomes':{}})
+            except (KeyError,TypeError,ValueError):continue
+        sources,errors=self.sources()
+        for e in sources:
+            try:
+                seen=self.time(e['first_seen'])
+                if not 0<=(at-seen).total_seconds()<=86400:continue
+                identity=e.get('id') or e.get('metadata_sha256')
+                if not identity:continue
+                prepared.append({'id':e['_kind']+':'+identity,'symbol':e['symbol'],'module':e.get('kind',e['_kind']),
+                    'direction':'OBSERVE','first_seen':stamp,'published_at':e.get('published_at') or e.get('accepted_at'),
+                    'source_first_seen':e['first_seen'],'source':e.get('source','SEC EDGAR'),'source_url':e.get('source_url'),
+                    'evidence':{'title':e.get('title'),'categories':e.get('categories'),'form':e.get('form'),'flag':e.get('flag'),
+                                'confidence':e.get('confidence','Filing metadata; not a directional prediction')},
+                    'active_action':actions.get(e['symbol'],'Not evaluated'),'baseline':None,'outcomes':{}})
+            except (KeyError,TypeError,ValueError):continue
+        with self.lock,closing(self.connect()) as db,db:
+            count=db.execute('SELECT COUNT(*) FROM signals').fetchone()[0]
+            for row in prepared:
+                if count>=10000:break
+                count+=db.execute('INSERT OR IGNORE INTO signals VALUES (?,?)',(row['id'],json.dumps(row,allow_nan=False))).rowcount
+            for ident,body in db.execute('SELECT id,body FROM signals').fetchall():
+                row=json.loads(body);price=prices.get(row['symbol']);seen=self.time(row['first_seen'])
+                if not price or at<seen:continue
+                base=row['baseline']
+                if base is None and 0<(at-seen).total_seconds()<=86400:
+                    row['baseline']=base={'at':stamp,'price_usd':price}
+                if base:
+                    hours=(at-self.time(base['at'])).total_seconds()/3600
+                    for horizon in (24,120):
+                        if horizon<=hours<=horizon+72 and str(horizon) not in row['outcomes']:
+                            ratio=price/base['price_usd']
+                            row['outcomes'][str(horizon)]={'at':stamp,'elapsed_hours':hours,'price_return_pct':100*(ratio-1),
+                                'hypothetical_long_after_cost_pct':100*(ratio*(1-.0025)*(1-.0015)/((1+.0025)*(1+.0015))-1)}
+                db.execute('UPDATE signals SET body=? WHERE id=?',(json.dumps(row,allow_nan=False),ident))
+
+    def state(self,export=False,now=None):
+        now=now or datetime.now(timezone.utc)
+        with self.lock,closing(self.connect()) as db:
+            rows=[json.loads(r[0]) for r in db.execute('SELECT body FROM signals ORDER BY rowid DESC')]
+        groups={}
+        for r in rows:
+            base=r['baseline'];age=(now-self.time(base['at'] if base else r['first_seen'])).total_seconds()/3600
+            r['status']='Unmeasured: no baseline within 24h' if not base and age>24 else 'Awaiting baseline' if not base else 'Complete' if len(r['outcomes'])==2 else 'Window ended: incomplete coverage' if age>192 else 'Awaiting later quotes'
+            g=groups.setdefault(r['module'],{'recorded':0,'measured_24h':0,'buy_measured_24h':0,'buy_positive_after_cost':0})
+            g['recorded']+=1
+            if '24' in r['outcomes']:
+                g['measured_24h']+=1
+                if r['direction']=='BUY':
+                    g['buy_measured_24h']+=1;g['buy_positive_after_cost']+=int(r['outcomes']['24']['hypothetical_long_after_cost_pct']>0)
+        return {'records':rows if export else rows[:100],'total':len(rows),'summary':groups,'source_errors':self.sources()[1],
+            'full':len(rows)>=10000,'note':'Observation only. First snapshot per stock/model/New York day, including BUY, SELL and HOLD; candidate coverage is selected by the active scanner. News is context, not a buy/sell prediction. Only newly discovered items (within 24h) enter; no retroactive baselines. Identical stored feed IDs are deduplicated, but differently worded reports may share an underlying story: counts are not independent votes. Baselines require fresh shared quotes; news requires a subsequent quote within 24h. Outcomes use the first available quote 24/120 elapsed hours after baseline, allowing up to 72h delay; missing windows remain unmeasured. USD moves are unadjusted for splits/dividends/FX. Hypothetical long results apply 0.25% price and 0.15% FX allowances on each side with constant FX; they are not actual trades, SELL profits or portfolio returns. Overlapping observations are not independent. No automatic promotion. Store stops at 10,000 records; export retains all evidence.'}
+
+
 class SessionScorecard:
     """Durable local check observations; never infers uptime outside recorded checks."""
     def __init__(self,directory):
