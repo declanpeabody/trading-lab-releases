@@ -56,6 +56,19 @@ class RankedScanner(Scanner):
         tmp=self.daily_path.with_suffix('.tmp')
         tmp.write_text(json.dumps(self.daily,allow_nan=False));tmp.chmod(0o600);tmp.replace(self.daily_path)
 
+    def focus_symbols(self,universe):
+        """Freeze a 50-name download priority for this session, not an entry signal."""
+        if 'focus_symbols' not in self.daily:
+            known=self.daily.get('previous_bars',{})|self.daily.get('bars',{})
+            liquidity={}
+            for symbol,rows in known.items():
+                try:liquidity[symbol]=assess(rows)['avg_dollar_volume']
+                except (ValueError,KeyError,TypeError):pass
+            seeds=[s for s in WATCHLIST if s in universe]
+            others=sorted((s for s in universe if s not in seeds),key=lambda s:(-liquidity.get(s,0),s))
+            self.daily['focus_symbols']=(seeds+others)[:50]
+        return [s for s in self.daily['focus_symbols'] if s in universe]
+
     def cycle(self, ledger):
         if not session_window(self.now('America/New_York')) or ledger.read()['paused']:return
         self.audit={'bars':{},'prices':{},'decisions':[],'before':ledger.read()}
@@ -89,6 +102,7 @@ class RankedScanner(Scanner):
     def _cycle(self,ledger):
         today=self.now('America/New_York').date().isoformat()
         held=list(ledger.read()['positions']);notes=[]
+        free_profile=getattr(ledger,'purchase_cap',200)==1000 and getattr(ledger,'max_positions',5)==5
         self.status=dict(mode='Batched 300-stock target · US regular hours',version=LIVE_VERSION,
             target_count=UNIVERSE_TARGET,universe_count=0,selected=[],checked=[],skipped=notes,ranking=[])
         cached=screening_universe(self.state['universe'])
@@ -109,6 +123,9 @@ class RankedScanner(Scanner):
             previous=self.daily.get('bars',{}) if self.daily.get('version')==LIVE_VERSION else {}
             self.daily={'day':today,'version':LIVE_VERSION,'bars':{},'attempted':[],'errors':{},'previous_bars':previous}
         bars=self.daily['bars'];attempted=set(self.daily['attempted'])
+        focus=self.focus_symbols(universe) if free_profile else []
+        self.status.update(focus_symbols=focus,focus_target=len(focus),focus_ready=sum(s in bars for s in focus),
+            history_policy='50-name daily priority plus wider rotation' if free_profile else 'Legacy rotating batches')
         self.status.update(histories_ready=sum(s in bars for s in universe),
             history_failures=dict(self.daily['errors']),histories_pending=sum(s not in bars and s not in attempted for s in universe))
         # Holdings need complete price histories for exits, but never need volume eligibility.
@@ -217,14 +234,17 @@ class RankedScanner(Scanner):
         # Five-holding free-plan profile: protect frequent mandatory checks.
         # Persist the optional-stage timestamp so restarts do not spend another batch.
         free_monitoring=expanded and slots==5
+        sold_this_cycle=any(d.get('action')=='SELL' for d in self.audit.get('decisions',[]))
+        self.status['replacement_priority']=bool(free_monitoring and sold_this_cycle)
         if free_monitoring:
             last=self.state.get('optional_checked_at',0)
-            if held and 0<=self.timestamp()-last<1800:
+            if held and not sold_this_cycle and 0<=self.timestamp()-last<1800:
                 self.status['selected']=[]
                 self.status['quote_requested']=[]
                 notes.append('Free-plan monitoring: holdings checked; candidates, comparisons and history preparation run at most every 30 minutes.')
                 return
             self.state['optional_checked_at']=self.timestamp();self.save()
+            if sold_this_cycle:notes.append('A sale freed capacity: candidate checks prioritised this cycle within normal credits and quote freshness limits.')
 
         # One optional SPY quote attempt per session; never use reserved credits.
         # Existing fresh account FX is reused; unavailable benchmark cannot block exits.
@@ -327,13 +347,32 @@ class RankedScanner(Scanner):
         # Decisions finish first. New histories only enter the NEXT scan's ranking.
         # Preserve the cursor across days/restarts so quota limits cannot starve the tail.
         cursor=self.state.get('screen_cursor',0);visited=0;batch=[];deadline=self.monotonic()+180
+        # Four priority downloads and one wider-universe slot per five-name batch.
+        # Once the focus is ready/attempted, the whole batch rotates more widely.
+        focus_pending=[s for s in focus if s not in attempted and s not in bars][:4]
+        queue=[]
+        if free_monitoring:
+            queue=[(s,cursor) for s in focus_pending]
+            for offset in range(len(universe)):
+                symbol=universe[(cursor+offset)%len(universe)]
+                if symbol not in focus and symbol not in attempted and symbol not in bars:
+                    queue.append((symbol,cursor+offset+1))
+                    if len(queue)>=5:break
+            # A small catalogue may have no wider names; use remaining focus slots.
+            queue.extend((s,cursor) for s in focus if s not in attempted and s not in bars and s not in {x[0] for x in queue})
         budget=self.budget or ApiBudget(self.directory);shared_failure=None
         while universe and visited<len(universe) and len(batch)<(5 if free_monitoring else HISTORY_BATCH):
             if ledger.read()['paused'] or not session_window(self.now('America/New_York')):break
             if self.monotonic()>=deadline:break
             if budget.used()>=500:
                 notes.append('Normal API budget exhausted; history batches paused, priority holdings checks retained.');break
-            symbol=universe[cursor%len(universe)];cursor=(cursor+1)%len(universe);visited+=1
+            previous_cursor=cursor
+            if free_monitoring:
+                if not queue:break
+                symbol,cursor=queue.pop(0)
+            else:
+                symbol=universe[cursor%len(universe)];cursor=(cursor+1)%len(universe)
+            visited+=1
             if symbol in attempted or symbol in bars:continue
             batch.append(symbol);attempted.add(symbol)
             try:
@@ -347,12 +386,12 @@ class RankedScanner(Scanner):
                         if cached not in held and cached in universe and cached not in bars and [r['datetime'][:10] for r in old]==grid:
                             bars[cached]=old
             except BudgetDeferred as exc:
-                attempted.discard(symbol);cursor-=1;batch.pop()
+                attempted.discard(symbol);cursor=previous_cursor;batch.pop()
                 notes.append(str(exc));break
             except MarketUnavailable as exc:
                 # Keep this symbol pending and stop the batch, rather than poisoning
                 # every stock's daily history cache with an account/network failure.
-                attempted.discard(symbol);cursor-=1;shared_failure=exc
+                attempted.discard(symbol);cursor=previous_cursor;shared_failure=exc
                 notes.append('History batch stopped after a shared data failure. Pending stocks will retry at a later scheduled check.')
                 break
             except (ValueError,TypeError,KeyError) as exc:
@@ -362,6 +401,7 @@ class RankedScanner(Scanner):
         self.state['screen_cursor']=cursor;self.save()
         count=sum(s in bars for s in universe)
         self.status.update(histories_ready=count,history_batch=batch,attempts_today=len(attempted),
+            focus_ready=sum(s in bars for s in focus),
             history_failures=dict(self.daily['errors']),histories_pending=sum(s not in bars and s not in attempted for s in universe))
         if shared_failure:
             self.status['optional_error']=str(shared_failure)

@@ -196,6 +196,9 @@ class Ledger:
     def valid_purchase_limit(self,value):
         return type(value) in (int,float) and value in (100,150,200,1000) and value<=getattr(self,'purchase_cap',MAX_POSITION)
 
+    def trading_signal(self,closes,price):
+        return signal(closes,price)
+
     def cycle(self, prices, histories, fx, date, stamp, symbols=None, history_rows=None, purchase_limit=MAX_POSITION):
         # Validate the complete snapshot before touching cash or holdings.
         if not self.valid_purchase_limit(purchase_limit):
@@ -205,7 +208,7 @@ class Ledger:
         if not symbols or len(set(symbols)) != len(symbols):
             raise ValueError('Empty or duplicate snapshot universe')
         prices = {symbol: positive(prices[symbol]) for symbol in symbols}
-        signals = {symbol: signal(histories[symbol], prices[symbol]) for symbol in symbols}
+        signals = {symbol: self.trading_signal(histories[symbol], prices[symbol]) for symbol in symbols}
         with self.lock:
             s = self.read()
             if s['paused']:

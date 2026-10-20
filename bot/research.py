@@ -365,9 +365,19 @@ class Experiments:
         self._change(change)
 
 
+class FasterDailyLedger(ExperimentLedger):
+    """Isolated 10/30-session comparison on the existing shared candidate stream."""
+    def trading_signal(self,closes,price):
+        from engine import signal
+        signal(closes,price)  # Retain full snapshot validation.
+        closes=[float(x) for x in closes];price=float(price)
+        fast,slow=sum(closes[-10:])/10,sum(closes[-30:])/30
+        return 'buy' if price>fast>slow else 'sell' if price<fast else 'hold'
+
+
 class ShadowTrials:
     """Prospective, opt-in comparisons. No promotion or active-ledger reference."""
-    NAMES=('baseline','allocation','filing_guard','concentration','confirmed_entry','volatility_size','trend_breadth','event_guard')
+    NAMES=('baseline','allocation','filing_guard','concentration','confirmed_entry','volatility_size','trend_breadth','event_guard','faster_daily')
     def __init__(self,directory):
         import sqlite3
         self.directory=Path(directory);self.path=self.directory/'shadow-trials.sqlite3'
@@ -403,7 +413,7 @@ class ShadowTrials:
             independent_holdout_verified=False,eligible_for_promotion=False) for k,m in metrics.items() if k!='baseline'}
         return s|{'metrics':metrics,'review_gates':gates,
             'review_note':'Screening thresholds: 60 observed sessions, 30 closed trades in each book, positive after-cost advantage, no worse observed drawdown and ≤10% missed snapshots. These are minimum review criteria, not statistical proof. Independent holdout review and explicit approval are always required; no automatic promotion.',
-            'note':'Prospective shared-data paper comparisons, never promoted automatically. Baseline: £200 cap. Allocation: £5 modelled price-risk budget, £150 cap, £200 cash reserve, two new entries per cycle and 0.8 positive correlation filter. Filing guard: £200 cap, requires SEC coverage within one hour and defers entries with a risk-coded filing first seen within seven days. This is not a news sentiment model. No coverage means no filing-guard buy. All accounts freeze together on missing holdings data. Returns include modelled exit costs; gaps can exceed the modelled risk budget. Concentration: £200 cap, at most two of AAPL/MSFT/AMZN/GOOGL/GOOG/META/NVDA/TSLA plus pairwise correlation ≤0.8; unknown/misaligned histories defer entry. Confirmed entry: buy signal on consecutive complete observations 15–60 minutes apart on the same day, at most two new entries per cycle. Entry filters only; original exits retained. These £1,000/£200 books do not represent the £10,000 active allocation. Volatility size: each entry capped at £5 divided by twice daily volatility (1% floor), maximum £200. Trend breadth: requires 30 aligned supplied histories, with at least 60% above their 50-session mean; this is partial scanner coverage, not a broad-market index. Event guard: defers entries within 48 hours before manually recorded events; missing calendar coverage remains unknown. No claim of statistical significance.'}
+            'note':'Prospective shared-data paper comparisons, never promoted automatically. Baseline: £200 cap. Allocation: £5 modelled price-risk budget, £150 cap, £200 cash reserve, two new entries per cycle and 0.8 positive correlation filter. Filing guard: £200 cap, requires SEC coverage within one hour and defers entries with a risk-coded filing first seen within seven days. This is not a news sentiment model. No coverage means no filing-guard buy. All accounts freeze together on missing holdings data. Returns include modelled exit costs; gaps can exceed the modelled risk budget. Concentration: £200 cap, at most two of AAPL/MSFT/AMZN/GOOGL/GOOG/META/NVDA/TSLA plus pairwise correlation ≤0.8; unknown/misaligned histories defer entry. Confirmed entry: buy signal on consecutive complete observations 15–60 minutes apart on the same day, at most two new entries per cycle. Original exits retained except in faster_daily. These £1,000/£200 books do not represent the £10,000 active allocation. Volatility size: each entry capped at £5 divided by twice daily volatility (1% floor), maximum £200. Trend breadth: requires 30 aligned supplied histories, with at least 60% above their 50-session mean; this is partial scanner coverage, not a broad-market index. Event guard: defers entries within 48 hours before manually recorded events; missing calendar coverage remains unknown. Faster daily: 10/30-session entry and trend-exit rules, £200 cap, existing 5% observed-loss exit and same-day re-entry block. Uses the active scanner candidate stream, so this does not test all possible faster-strategy entries. No extra quote allowance. No claim of statistical significance.'}
     def control(self,action,enabled=None):
         def update(s):
             if action=='enabled' and type(enabled) is bool:
@@ -457,8 +467,8 @@ class ShadowTrials:
             histories={x:[float(r['close']) for r in bars[x]] for x in required}
             updated={};actions=[]
             for name,body in s['books'].items():
-                ledger=ExperimentLedger(body);ledger.body['buy_block']=bool(buy_block)
-                chosen=[x for x in entries if x not in body['positions'] and signal(histories[x],prices[x])=='buy']
+                ledger=(FasterDailyLedger if name=='faster_daily' else ExperimentLedger)(body);ledger.body['buy_block']=bool(buy_block)
+                chosen=[x for x in entries if x not in body['positions'] and ledger.trading_signal(histories[x],prices[x])=='buy']
                 cap=200
                 if name=='allocation':
                     selected=[]
