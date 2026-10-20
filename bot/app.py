@@ -15,7 +15,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 from engine import Ledger
 from market import Market, session_window, validate_key, MarketUnavailable, ApiBudget, ConnectionTest
-from research import Research, Experiments, ShadowTrials, ReliableExperiments, StrategyObservatory, SessionScorecard, EventCalendar
+from research import Research, Experiments, ShadowTrials, ReliableExperiments, StrategyObservatory, SessionScorecard, EventCalendar, ResearchSignals
 from ranked_scanner import RankedScanner, Journal
 from news import News, optional_news
 from updater import Updates
@@ -100,7 +100,7 @@ def worker(ledger):
 
 def top_navigation(path,nonce):
     links=[('/#overview','Overview'),('/#positions','Positions'),('/#reports','Reports'),('/#diagnostics','Diagnostics'),('/#scanner','Scanner'),('/#markets','Markets'),
-           ('/research','Research & Journal'),('/research#observatory','Strategy Observatory'),('/research#experiments','Strategy Experiments'),('/news','News'),('/#rules','Rules & Limits'),('/updates','Software Updates')]
+           ('/research','Research & Journal'),('/research#signals','Research Signals'),('/research#observatory','Strategy Observatory'),('/research#experiments','Strategy Experiments'),('/news','News'),('/#rules','Rules & Limits'),('/updates','Software Updates')]
     style='<style nonce="'+nonce+'">.top-nav{display:flex;flex-wrap:wrap;gap:8px;margin:20px 0;padding:0 0 16px;border-bottom:1px solid #2b3545}.top-nav a{display:inline-flex;align-items:center;min-height:44px;padding:10px 14px;border:1px solid #3f4d63;border-radius:7px;color:#c6d0df;background:#111925;text-decoration:none;font:600 13px system-ui}.top-nav a[aria-current]{color:#101620;background:#d8f36a;border-color:#d8f36a}.top-nav a:focus-visible{outline:3px solid #a8ceff;outline-offset:3px}</style>'
     return style+'<nav class="top-nav" aria-label="Dashboard navigation">'+''.join(
         '<a href="'+href+'"'+(' aria-current="page"' if href==path else '')+'>'+label.replace('&','&amp;')+'</a>' for href,label in links)+'</nav>'
@@ -196,6 +196,11 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
                 self.respond(200, json.dumps(state, allow_nan=False))
             elif self.path == '/api/accounting/export':
                 self.respond(200,json.dumps(ledger.accounting(100000),allow_nan=False),extra={'Content-Disposition':'attachment; filename="paper-executions.json"'})
+            elif self.path in ('/api/signals','/api/signals/export'):
+                try:
+                    data=ResearchSignals(os.getenv('DATA_DIR','/data')).state(export=self.path.endswith('/export'))
+                    self.respond(200,json.dumps(data,allow_nan=False),extra={'Content-Disposition':'attachment; filename="research-signals.json"'} if self.path.endswith('/export') else None)
+                except (OSError,ValueError,sqlite3.Error):self.respond(503,json.dumps({'error':'Research signal storage unavailable; existing evidence preserved.'}))
             elif self.path == '/api/calendar':
                 self.respond(200,json.dumps(EventCalendar(os.getenv('DATA_DIR','/data')).state(),allow_nan=False))
             elif self.path == '/api/observatory':
