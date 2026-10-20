@@ -20,6 +20,9 @@ from ranked_scanner import RankedScanner, Journal
 from news import News, optional_news
 from updater import Updates
 from version import VERSION
+from research import DailyLearning
+
+LEARNING = None
 
 ROOT = Path(__file__).parent
 PROCESS_STARTED_AT = datetime.now(ZoneInfo('UTC')).isoformat()
@@ -100,7 +103,7 @@ def worker(ledger):
 
 def top_navigation(path,nonce):
     links=[('/#overview','Overview'),('/#positions','Positions'),('/#reports','Reports'),('/#diagnostics','Diagnostics'),('/#scanner','Scanner'),('/#markets','Markets'),
-           ('/research','Research & Journal'),('/research#signals','Research Signals'),('/research#observatory','Strategy Observatory'),('/research#experiments','Strategy Experiments'),('/news','News'),('/#rules','Rules & Limits'),('/updates','Software Updates')]
+           ('/research','Research & Journal'),('/research#learning','Daily Learning'),('/research#signals','Research Signals'),('/research#observatory','Strategy Observatory'),('/research#experiments','Strategy Experiments'),('/news','News'),('/#rules','Rules & Limits'),('/updates','Software Updates')]
     style='<style nonce="'+nonce+'">.top-nav{display:flex;flex-wrap:wrap;gap:8px;margin:20px 0;padding:0 0 16px;border-bottom:1px solid #2b3545}.top-nav a{display:inline-flex;align-items:center;min-height:44px;padding:10px 14px;border:1px solid #3f4d63;border-radius:7px;color:#c6d0df;background:#111925;text-decoration:none;font:600 13px system-ui}.top-nav a[aria-current]{color:#101620;background:#d8f36a;border-color:#d8f36a}.top-nav a:focus-visible{outline:3px solid #a8ceff;outline-offset:3px}</style>'
     return style+'<nav class="top-nav" aria-label="Dashboard navigation">'+''.join(
         '<a href="'+href+'"'+(' aria-current="page"' if href==path else '')+'>'+label.replace('&','&amp;')+'</a>' for href,label in links)+'</nav>'
@@ -201,6 +204,12 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
                     data=ResearchSignals(os.getenv('DATA_DIR','/data')).state(export=self.path.endswith('/export'))
                     self.respond(200,json.dumps(data,allow_nan=False),extra={'Content-Disposition':'attachment; filename="research-signals.json"'} if self.path.endswith('/export') else None)
                 except (OSError,ValueError,sqlite3.Error):self.respond(503,json.dumps({'error':'Research signal storage unavailable; existing evidence preserved.'}))
+            elif self.path == '/api/learning':
+                try:
+                    learning = LEARNING or DailyLearning(os.getenv('DATA_DIR','/data'))
+                    self.respond(200,json.dumps(learning.state(),allow_nan=False))
+                except (OSError,ValueError,sqlite3.Error):
+                    self.respond(503,json.dumps({'error':'Daily learning storage unavailable; existing evidence preserved.'}))
             elif self.path == '/api/calendar':
                 self.respond(200,json.dumps(EventCalendar(os.getenv('DATA_DIR','/data')).state(),allow_nan=False))
             elif self.path == '/api/observatory':
@@ -491,6 +500,7 @@ def monitoring_stdio(directory,source=None,target=None):
 
 
 def main():
+    global LEARNING
     password = os.environ.get('DASHBOARD_PASSWORD','')
     if len(password) < 20 or password.startswith('REPLACE'):
         raise SystemExit('Set a unique DASHBOARD_PASSWORD of at least 20 characters in your local configuration.')
@@ -500,6 +510,8 @@ def main():
     try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError: raise SystemExit('Another worker is already using this data disk.')
     ledger = Ledger(directory/'paper.sqlite3',initial_cash=10000,max_positions=5,purchase_cap=1000)
+    LEARNING = DailyLearning(directory)
+    threading.Thread(target=LEARNING.worker,args=(ledger, STOP),daemon=True).start()
     news = optional_news(directory)
     news_thread = threading.Thread(target=news.worker, args=(ledger, STOP), daemon=True)
     news_thread.start()

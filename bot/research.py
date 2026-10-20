@@ -836,3 +836,237 @@ class EventCalendar:
     def upcoming(self,symbol,stamp):
         at=datetime.fromisoformat(stamp)
         return any(e['symbol']==symbol and datetime.fromisoformat(e['first_seen'])<=at and timedelta(0)<=datetime.fromisoformat(e['at'])-at<=timedelta(hours=48) for e in self.state()['events'])
+
+
+"""Daily, local-only evidence review and bounded strategy-code generation.
+
+No model provider, arbitrary code execution, network calls or active account writes.
+A frozen candidate is assessed on signals first observed AFTER selection.
+"""
+import hashlib
+import json
+import math
+import sqlite3
+import threading
+from contextlib import closing
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from statistics import mean
+from zoneinfo import ZoneInfo
+
+NY = ZoneInfo('America/New_York')
+MODELS = {'trend_20_50': (20, 50), 'faster_10_30': (10, 30)}
+BASELINE = 'trend_20_50'
+MIN_DAYS = 30
+MIN_BUYS = 20
+NOTE = ('Research only; no active rule changes. Scores describe selected scanner observations, '
+        'not portfolio returns or independent samples. News is context, not a prediction. '
+        '120-hour outcomes include modelled trading friction but not changing FX, dividends or splits. '
+        'Missing observations are not zero returns. Candidate screening needs 30 distinct observation '
+        'dates, 20 BUY observations per model, 90% paired coverage, positive mean score, '
+        '>0.1 percentage-point mean advantage and no worse worst daily score. '
+        'Selection is followed by a separate prospective test with the same gates. '
+        'Passing proposes a review, never a live deployment. Code generation uses two fixed templates only.')
+
+
+def timestamp(value):
+    dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    if dt.tzinfo is None:
+        raise ValueError('Timezone required')
+    return dt.astimezone(timezone.utc)
+
+
+def strategy_code(model):
+    short, long = MODELS[model]  # Never interpolate external text into code.
+    return (f'"""Generated research candidate: {model}. No execution authority."""\n'
+            f'SHORT = {short}\nLONG = {long}\n\n'
+            'def signal(price, closes):\n'
+            '    if len(closes) < LONG:\n        return "HOLD"\n'
+            '    fast = sum(closes[-SHORT:]) / SHORT\n'
+            '    slow = sum(closes[-LONG:]) / LONG\n'
+            '    return "BUY" if price > fast > slow else "SELL" if price < fast else "HOLD"\n')
+
+
+def outcome(row, now):
+    value = row.get('outcomes', {}).get('120')
+    if not value or timestamp(value['at']) > now:
+        return None
+    base = row.get('baseline')
+    if not base or timestamp(base['at']) < timestamp(row['first_seen']):
+        return None
+    hours = (timestamp(value['at']) - timestamp(base['at'])).total_seconds() / 3600
+    result = value.get('hypothetical_long_after_cost_pct')
+    if not 120 <= hours <= 192 or type(result) not in (int, float) or not math.isfinite(result):
+        return None
+    return result
+
+
+def scorecards(rows, now):
+    groups = {}
+    for r in rows:
+        key = (r['module'], r['source'])
+        g = groups.setdefault(key, dict(module=key[0], source=key[1], recorded=0,
+             measured=0, pending=0, missing=0, buys=0, positive=0, negative=0,
+             missed_buy_observations=0, avoided_negative_observations=0, _values=[]))
+        g['recorded'] += 1
+        result = outcome(r, now)
+        if result is None:
+            base = r.get('baseline')
+            deadline = timestamp(base['at'] if base else r['first_seen']) + timedelta(hours=192 if base else 24)
+            g['missing' if now > deadline else 'pending'] += 1
+        else:
+            g['measured'] += 1
+            if r['direction'] == 'BUY':
+                g['buys'] += 1
+                g['positive'] += result > 0
+                g['negative'] += result < 0
+                g['_values'].append(result)
+                # Unknown/unexamined candidates cannot be labelled missed trades.
+                if r.get('active_action') in ('HOLD', 'SKIP', 'SELL'):
+                    g['missed_buy_observations'] += result > 0
+                    g['avoided_negative_observations'] += result < 0
+    for g in groups.values():
+        values = g.pop('_values')
+        g['mean_buy_after_cost_pct'] = mean(values) if values else None
+        g['predictive_value'] = 'Not established; descriptive observations only'
+    return list(groups.values())
+
+
+def paired_scores(rows, now, start=None, end=None):
+    """Paired stock/day opportunities; no retrospective holdout reuse."""
+    pairs = {}
+    for r in rows:
+        seen = timestamp(r['first_seen'])
+        if r['module'] not in MODELS or seen > now or (start and seen <= start) or (end and seen > end):
+            continue
+        # All rows in this cohort must have had time to finish the full window.
+        if (now - seen).total_seconds() < 193 * 3600:
+            continue
+        key = (r['symbol'], seen.astimezone(NY).date().isoformat())
+        pairs.setdefault(key, {})[r['module']] = r
+    daily = {m: {} for m in MODELS}
+    buys = {m: 0 for m in MODELS}
+    measured = 0
+    for (_, day), pair in pairs.items():
+        if set(pair) != set(MODELS):
+            continue
+        values = {m: outcome(r, now) for m, r in pair.items()}
+        if any(v is None for v in values.values()):
+            continue
+        # Both original models must have shared the same snapshot price/time.
+        if pair[BASELINE]['baseline'] != pair['faster_10_30']['baseline']:
+            continue
+        measured += 1
+        for m, r in pair.items():
+            buy = r['direction'] == 'BUY'
+            buys[m] += buy
+            daily[m].setdefault(day, []).append(values[m] if buy else 0.0)
+    metrics = {}
+    for m, days in daily.items():
+        values = [mean(v) for v in days.values()]
+        metrics[m] = dict(days=len(values), buys=buys[m],
+                          mean_score_pct=mean(values) if values else None,
+                          worst_day_score_pct=min(values) if values else None)
+    return dict(eligible_pairs=len(pairs), measured_pairs=measured,
+                coverage=measured / len(pairs) if pairs else 0, models=metrics)
+
+
+def passes(stats):
+    a, b = stats['models']['faster_10_30'], stats['models'][BASELINE]
+    return (stats['coverage'] >= .9 and all(m['days'] >= MIN_DAYS and m['buys'] >= MIN_BUYS for m in (a, b))
+            and a['mean_score_pct'] > 0 and a['mean_score_pct'] - b['mean_score_pct'] > .1
+            and a['worst_day_score_pct'] >= b['worst_day_score_pct'])
+
+
+class DailyLearning:
+    def __init__(self, directory):
+        self.directory = Path(directory)
+        self.path = self.directory / 'daily-learning.sqlite3'
+        self.error = None
+
+    def connect(self):
+        db = sqlite3.connect(self.path, timeout=1)
+        db.execute('CREATE TABLE IF NOT EXISTS reviews(day TEXT PRIMARY KEY, body TEXT NOT NULL)')
+        db.execute('CREATE TABLE IF NOT EXISTS model(id INTEGER PRIMARY KEY, body TEXT NOT NULL)')
+        return db
+
+    def state(self):
+        with closing(self.connect()) as db:
+            r = db.execute('SELECT body FROM reviews ORDER BY day DESC LIMIT 1').fetchone()
+            m = db.execute('SELECT body FROM model WHERE id=1').fetchone()
+        return dict(last_review=json.loads(r[0]) if r else None,
+                    model=json.loads(m[0]) if m else {'phase': 'development'},
+                    error=self.error, schedule='Once per weekday after 18:00 New York; requires running app. No backfilled daily reviews.',
+                    note=NOTE, automatic_deployment=False)
+
+    def review(self, ledger, now=None):
+        now = now or datetime.now(timezone.utc)
+        local = now.astimezone(NY)
+        if local.weekday() >= 5 or local.hour < 18:
+            return False
+        day = local.date().isoformat()
+        with closing(self.connect()) as db:
+            if db.execute('SELECT 1 FROM reviews WHERE day=?', (day,)).fetchone():
+                return False
+        evidence = ResearchSignals(self.directory).state(export=True, now=now)
+        rows = [r for r in evidence['records'] if timestamp(r['first_seen']) <= now]
+        accounting = ledger.accounting(100000)
+        executions = [e for e in accounting['executions'] if timestamp(e['at']) <= now]
+        today = [e for e in executions if timestamp(e['at']).astimezone(NY).date().isoformat() == day]
+        closed = [e for e in today if e['side'] == 'SELL']
+        cards = scorecards(rows, now)
+        development = paired_scores(rows, now)
+        with closing(self.connect()) as db, db:
+            db.execute('BEGIN IMMEDIATE')
+            if db.execute('SELECT 1 FROM reviews WHERE day=?', (day,)).fetchone():
+                return False
+            old = db.execute('SELECT body FROM model WHERE id=1').fetchone()
+            model = json.loads(old[0]) if old else {'phase': 'development'}
+            decision = 'No change: insufficient qualifying evidence or screening gates not met.'
+            if model['phase'] == 'development' and passes(development) and not evidence['source_errors']:
+                code = strategy_code('faster_10_30')
+                compile(code, '<generated-research-candidate>', 'exec')  # Syntax check only.
+                digest = hashlib.sha256(code.encode()).hexdigest()
+                folder = self.directory / 'learning-candidates'
+                folder.mkdir(exist_ok=True)
+                target = folder / (digest + '.py')
+                temp = target.with_suffix('.tmp')
+                temp.write_text(code); temp.chmod(0o600); temp.replace(target)
+                model = dict(phase='forward_test', selected='faster_10_30', frozen_at=now.isoformat(),
+                             code_sha256=digest, candidate_file=target.name, development=development,
+                             approval_required=True)
+                decision = 'Candidate code generated and frozen; waiting for new forward-test observations.'
+            if model['phase'] == 'forward_test':
+                candidate = self.directory / 'learning-candidates' / model['candidate_file']
+                if hashlib.sha256(candidate.read_bytes()).hexdigest() != model['code_sha256']:
+                    raise ValueError('Candidate code changed; forward test cannot continue')
+                test = paired_scores(rows, now, start=timestamp(model['frozen_at']))
+                model['forward_test'] = test
+                decision = 'No change: frozen candidate collecting new forward-test evidence.'
+                if test['models'][BASELINE]['days'] >= MIN_DAYS:
+                    model['phase'] = 'review_proposal' if passes(test) and not evidence['source_errors'] else 'rejected'
+                    model['finished_at'] = now.isoformat()
+                    decision = ('Candidate passed screening: independent portfolio review and approval required.'
+                                if model['phase'] == 'review_proposal' else 'No change: candidate failed forward-test gates.')
+            elif model['phase'] in ('review_proposal', 'rejected'):
+                decision = 'No change: completed evaluation retained; no automatic retesting or deployment.'
+            report = dict(day=day, completed_at=now.isoformat(), observations=len(rows),
+                          usable_observations=sum(g['measured'] for g in cards), source_scorecards=cards,
+                          source_errors=evidence['source_errors'], store_full=evidence['full'],
+                          closed_trades=len(closed), realised_pnl_gbp=sum(e['realised_pnl_gbp'] for e in closed),
+                          execution_costs_gbp=sum(e['price_cost_gbp'] + e['fx_cost_gbp'] for e in today),
+                          closed_trade_reviews=closed, development=development, decision=decision,
+                          limitations='Closed-trade totals cover this review date and detailed recorded fills only. Missed BUY observations are hypothetical, not executable missed profits. No benchmark-adjusted news attribution yet.')
+            db.execute('INSERT OR REPLACE INTO model VALUES(1,?)', (json.dumps(model, allow_nan=False),))
+            db.execute('INSERT INTO reviews VALUES(?,?)', (day, json.dumps(report, allow_nan=False)))
+            db.execute('DELETE FROM reviews WHERE day NOT IN (SELECT day FROM reviews ORDER BY day DESC LIMIT 366)')
+        return True
+
+    def worker(self, ledger, stop):
+        while not stop.is_set():
+            try:
+                self.review(ledger)
+                self.error = None
+            except Exception:
+                self.error = 'Daily review failed; existing evidence preserved. Check storage and source records.'
+            stop.wait(60)

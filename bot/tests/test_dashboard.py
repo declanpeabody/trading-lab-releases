@@ -218,4 +218,14 @@ class DashboardTests(unittest.TestCase):
             with self.get('/api/observatory') as r:self.assertEqual(json.load(r)['total'],1)
             self.assertEqual(self.ledger.read(),before)
 
+    def test_daily_learning_is_private_and_read_only(self):
+        with patch.dict('os.environ', {'DATA_DIR': self.temp.name}), patch('app.LEARNING', None):
+            before=self.ledger.read()
+            with self.assertRaises(HTTPError) as err: self.get('/api/learning', False)
+            self.assertEqual(err.exception.code,401)
+            with self.get('/api/learning') as response: state=json.load(response)
+            self.assertIsNone(state['last_review'])
+            self.assertFalse(state['automatic_deployment'])
+            self.assertEqual(self.ledger.read(),before)
+
 if __name__ == '__main__': unittest.main()
