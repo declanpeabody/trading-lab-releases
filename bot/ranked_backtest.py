@@ -38,11 +38,19 @@ def parse_series(data,symbol):
     if not out:raise ValueError('No historical bars returned')
     return out
 
-def run(series,start,end,slippage_bps=25,fx_fee_bps=15,purchase_limit=MAX_POSITION):
-    if purchase_limit not in (100,150,200):raise ValueError("Research purchase size must be £100, £150 or £200")
+def run(series,start,end,slippage_bps=25,fx_fee_bps=15,purchase_limit=MAX_POSITION, *, initial_gbp=PAPER_CAPITAL, spread_bps=0, dividends=None, benchmark=False):
+    if purchase_limit not in (100,150,200,1000):raise ValueError("Research purchase size must be £100, £150, £200 or £1,000")
+    initial_gbp=positive(initial_gbp)
+    if initial_gbp>1000000 or purchase_limit>initial_gbp:raise ValueError("Invalid research capital")
+    spread=float(spread_bps)/10000
+    if not math.isfinite(spread) or not 0<=spread<=.02:raise ValueError("Spread must be 0–200 bps")
     slip,fee=float(slippage_bps)/10000,float(fx_fee_bps)/10000
     if not all(math.isfinite(x) and 0<=x<=.02 for x in (slip,fee)):raise ValueError('Cost allowances must be 0–200 bps')
+    slip+=spread/2
     ordered,selected,rates=prepare(series,start,end,WATCHLIST)
+    dividend_rows=validate_dividends(dividends or [],start,end,series)
+    if benchmark and any(day not in series.get('SPY',{}) for day in selected):raise ValueError('SPY benchmark sessions incomplete')
+    labels=LABELS|({'spy':'SPY buy-and-hold'} if benchmark else {})
     rankings={};histories={}
     for day in selected:
         i=ordered.index(day)
@@ -50,8 +58,8 @@ def run(series,start,end,slippage_bps=25,fx_fee_bps=15,purchase_limit=MAX_POSITI
         rankings[day]=rank_histories(bars)
         histories[day]={s:[r['close'] for r in rows] for s,rows in bars.items()}
     comparisons={}
-    for name in LABELS:
-        cash=PAPER_CAPITAL;positions={};trades=[];curve=[];locked=False
+    for name in labels:
+        cash=initial_gbp;positions={};trades=[];curve=[];locked=False;receivables=[]
         def buy(s,day,budget,reason):
             nonlocal cash
             price=positive(series[s][day]['open']);fx=rates[day]
@@ -71,8 +79,16 @@ def run(series,start,end,slippage_bps=25,fx_fee_bps=15,purchase_limit=MAX_POSITI
                 fx_gbp_per_usd=fx,net_gbp=net,cost_gbp=gross-net,pnl_gbp=net-p['cost'],reason=reason))
         for day in selected:
             fx=rates[day];past=histories[day]
-            opening=cash+sum(p['qty']*series[s][day]['open']*fx for s,p in positions.items())
-            if opening<=PAPER_CAPITAL*(1-LOSS_FRACTION):locked=True
+            for event in dividend_rows:
+                if event['ex_date']==day and event['symbol'] in positions:
+                    receivables.append(dict(symbol=event['symbol'],payment_date=event['payment_date'],usd=positions[event['symbol']]['qty']*event['amount_usd']))
+            for payment in list(receivables):
+                if payment['payment_date']<=day:
+                    net=payment['usd']*fx*(1-fee);cash+=net;receivables.remove(payment)
+                    trades.append(dict(date=day,symbol=payment['symbol'],side='DIVIDEND',quantity=0,price_usd=0,fx_gbp_per_usd=fx,net_gbp=net,cost_gbp=payment['usd']*fx-net,pnl_gbp=None,reason='User-supplied dividend, net amount per adjusted share'))
+            accrued=sum(p['usd'] for p in receivables)*fx*(1-fee)
+            opening=cash+accrued+sum(p['qty']*series[s][day]['open']*fx for s,p in positions.items())
+            if opening<=initial_gbp*(1-LOSS_FRACTION):locked=True
             if name in ('strategy','unranked'):
                 ranking=rankings[day]
                 if name=='unranked':ranking=sorted(ranking,key=lambda r:r['symbol'])
@@ -86,18 +102,19 @@ def run(series,start,end,slippage_bps=25,fx_fee_bps=15,purchase_limit=MAX_POSITI
                     if not locked and len(positions)<MAX_OPEN and s not in exited:
                         buy(s,day,purchase_limit,'Ranked entry' if name=='strategy' else 'Alphabetical entry')
             elif name=='equal_weight' and day==selected[0]:
-                for s in WATCHLIST:buy(s,day,PAPER_CAPITAL/len(WATCHLIST),'Equal-weight benchmark')
-            equity=cash+sum(p['qty']*series[s][day]['close']*fx for s,p in positions.items())
-            if equity<=PAPER_CAPITAL*(1-LOSS_FRACTION):locked=True
+                for s in WATCHLIST:buy(s,day,initial_gbp/len(WATCHLIST),'Equal-weight benchmark')
+            elif name=='spy' and day==selected[0]:buy('SPY',day,initial_gbp,'SPY benchmark')
+            equity=cash+accrued+sum(p['qty']*series[s][day]['close']*fx for s,p in positions.items())
+            if equity<=initial_gbp*(1-LOSS_FRACTION):locked=True
             if day==selected[-1]:
                 for s in list(positions):sell(s,day,series[s][day]['close'],'End-of-test liquidation')
-                equity=cash
-            curve.append({'date':day,'equity':equity,'cash':cash,'positions':len(positions)})
-        comparisons[name]={'metrics':metrics(curve,trades,selected[0],selected[-1],PAPER_CAPITAL),'curve':curve,'trades':trades}
-    return dict(schema_version=2,strategy_settings=settings()|{"max_purchase":purchase_limit},labels=LABELS,
+                equity=cash+accrued
+            curve.append({'date':day,'equity':equity,'cash':cash,'positions':len(positions),'dividend_receivable_gbp':accrued})
+        comparisons[name]={'metrics':metrics(curve,trades,selected[0],selected[-1],initial_gbp),'curve':curve,'trades':trades}
+    return dict(schema_version=2,strategy_settings=settings()|{"max_purchase":purchase_limit},labels=labels,
         requested_start=start,requested_end=end,start=selected[0],end=selected[-1],sessions=len(selected),
-        symbols=list(WATCHLIST),initial_gbp=PAPER_CAPITAL,slippage_bps=slippage_bps,fx_fee_bps=fx_fee_bps,
-        warnings=WARNINGS,comparisons=comparisons)
+        symbols=list(WATCHLIST),initial_gbp=initial_gbp,slippage_bps=slippage_bps,fx_fee_bps=fx_fee_bps,
+        warnings=WARNINGS,comparisons=comparisons,spread_bps=spread_bps,dividend_inputs=dividend_rows)
 
 
 def walk_forward(series,start,end,slippage_bps=25,fx_fee_bps=15):
@@ -274,3 +291,52 @@ def run_batched(series,mapping,start,end,slippage_bps=25,fx_fee_bps=15,normal_li
             'Daily closing valuation uses the prior FX close; missing held bars retain the previous mark and are identified in coverage. Last session liquidates with modelled costs.',
             'This replay uses the fixed £200 purchase setting. Prospective experiment accounts and automatic promotions are not replayed; this report cannot qualify a promotion.',
         ])
+
+
+def validate_dividends(rows,start,end,series=None):
+    from urllib.parse import urlsplit
+    if not isinstance(rows,list) or len(rows)>100:raise ValueError('Provide at most 100 dividend records')
+    out=[];seen=set()
+    for row in rows:
+        if not isinstance(row,dict):raise ValueError('Invalid dividend record')
+        symbol=row.get('symbol');ex=date.fromisoformat(row.get('ex_date',''));pay=date.fromisoformat(row.get('payment_date',''))
+        amount=float(row.get('amount_usd',-1));source=str(row.get('source',''));url=urlsplit(source)
+        if symbol not in (*WATCHLIST,'SPY') or not start<=ex.isoformat()<=end or pay<ex or (pay-ex).days>366:raise ValueError('Invalid dividend symbol or dates')
+        if not math.isfinite(amount) or not 0<amount<=1000 or url.scheme!='https' or not url.hostname or url.username or url.password or len(source)>500:raise ValueError('Dividend requires a positive net USD amount and HTTPS source')
+        if (symbol,ex) in seen:raise ValueError('Duplicate dividend event')
+        if series is not None and ex.isoformat() not in series.get(symbol,{}):raise ValueError('Dividend ex-date has no price bar')
+        seen.add((symbol,ex));out.append(dict(symbol=symbol,ex_date=ex.isoformat(),payment_date=pay.isoformat(),amount_usd=amount,source=source))
+    return out
+
+
+def stress_test(series,start,end,slippage_bps=25,fx_fee_bps=15,initial_gbp=10000,purchase_limit=1000,spread_bps=10,dividends=None):
+    """Fixed cost sensitivity tests, not parameter optimisation or promotion."""
+    report=run(series,start,end,slippage_bps,fx_fee_bps,purchase_limit,initial_gbp=initial_gbp,
+        spread_bps=spread_bps,dividends=dividends,benchmark=True)
+    base=report['comparisons']['strategy']['metrics'];cases=[]
+    for extra in (0,25,75):
+        slip=min(200,float(slippage_bps)+extra)
+        tested=report if extra==0 else run(series,start,end,slip,fx_fee_bps,purchase_limit,initial_gbp=initial_gbp,
+            spread_bps=spread_bps,dividends=dividends,benchmark=True)
+        m=tested['comparisons']['strategy']['metrics']
+        cases.append(dict(slippage_bps=slip,spread_bps=spread_bps,return_pct=m['return_pct'],max_drawdown_pct=m['max_drawdown_pct'],
+            costs_gbp=m['modelled_costs_gbp'],closed_trades=m['closed_trades']))
+    gaps=[]
+    for symbol in WATCHLIST:
+        days=sorted(series[symbol])
+        for before,day in zip(days,days[1:]):
+            if start<=day<=end:gaps.append(dict(symbol=symbol,date=day,gap_pct=100*(series[symbol][day]['open']/series[symbol][before]['close']-1)))
+    report['stress']=dict(cases=cases,largest_gaps=sorted(gaps,key=lambda x:abs(x['gap_pct']),reverse=True)[:10],
+        strategy_minus_spy_pct=base['return_pct']-report['comparisons']['spy']['metrics']['return_pct'],
+        dividend_coverage='User-supplied events only; completeness and split-adjusted share basis unverified' if dividends else 'No dividend events supplied: price-return comparison only',
+        method='Three predeclared cost scenarios; same data, five-position strategy, next-open fills. Not an unused holdout.')
+    report['warnings']=[
+        'Observation only. Fixed current 30-stock sample has survivorship/selection bias and is not a replay of the 300-stock scanner.',
+        f'Capital £{initial_gbp:,.0f}, purchase cap £{purchase_limit:,.0f}, five positions. SPY and equal-weight benchmarks invest full capital and have different exposures.',
+        'Signals use prior completed sessions; orders fill at the next open, including observed overnight gaps. Intraday stops, order-book liquidity and partial fills are not reconstructed.',
+        'Full bid/ask spread is an assumption: half is charged each way in addition to adverse slippage and FX conversion costs. These are not verified executable quotes.',
+        'Dividends require net USD per split-adjusted share, ex-date, payment date and source. Entitlement uses holdings before ex-date trades; cash arrives on/after payment date. Outstanding receivables remain in final equity. No dividend completeness guarantee, interest, tax calculation or corporate-action reconciliation.',
+        'Provider split-adjusted historical data can be revised. Company fundamentals collected today are never injected into these historical signals.',
+        'Scenarios are descriptive, correlated and not statistically independent. Results do not select or deploy a new strategy.',
+    ]
+    return report
