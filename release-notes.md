@@ -1,10 +1,10 @@
-2026.10.18.2 — Reliability and research evidence
+2026.10.20.1 — Focused scanning and quicker replacement checks
 
-- Diagnostics adds a durable session reliability scorecard: recorded attempts, successful account checks, quote failures, unfinished checks and gaps between successful cycle starts. Not an uptime guarantee; request use remains in the budget panel.
-- Reports adds closed-trade reviews with entry trend evidence, holding duration, realised GBP profit/loss and sampled USD price excursions. Missing legacy observations remain unknown; confirmed splits restart the observation range as partial. Execution exports include the evidence.
-- Opt-in comparisons add individually volatility-sized entries, a supplied-history breadth filter and a 48-hour manually recorded event guard. They use shared snapshots and the existing request allowance. Breadth is not a broad-market index; event coverage is unverified and incomplete.
-- Research adds a manual event calendar with source URLs, timezone validation and first-seen timestamps. No automatic news or earnings feed, no source fetching and no active news-based decisions.
-- Comparison review criteria show minimum sample, after-cost baseline, drawdown and coverage gates. Independent holdout review and explicit approval remain required; no automatic promotion of these models.
-- Existing comparison books are preserved and paused when models change. Explicit Restart comparison is needed to start comparable new books. Active capital, five slots, £1,000 cap, trading rules and API limits stay unchanged.
+- Prioritises 50 histories each session in the five-holding free-plan profile: the original 30 where listed plus 20 chosen by available historical dollar volume, falling back to alphabetical order for unknown histories. The list is frozen for the session. This is not a verified top-50 liquidity index.
+- Each five-history batch prepares up to four priority names and one wider-universe name. Spare slots rotate more widely once priority names are processed. All 300 supported names remain eligible with valid current history. Coverage still depends on quota and uptime.
+- A completed sale bypasses the 30-minute optional-stage wait so ready candidates can be checked in the same cycle. Normal reserves, regular hours, quote freshness and same-day re-entry blocks still apply. Optional failures cannot undo completed sales. No forced rotation or guaranteed replacement.
+- Adds the opt-in faster_daily comparison using 10/30-session trend rules with the same costs, 5% observed-loss exit and re-entry block. It receives the existing scanner candidate stream: faster opportunities excluded by the active ranker remain untested. No automatic promotion or additional quote allowance.
+- Old comparison books are preserved and paused until explicit restart. Active capital, five slots, £1,000 purchase cap and 20/50 trading signals remain intact.
+- Scanner displays daily-priority coverage and replacement status. Research forms stack vertically on phones.
 
-Validation: focused regression tests, Python/JavaScript checks, full GitHub tests and desktop/mobile dashboard browser checks before publication.
+Validation: focus/rotation, restart, budget-deferral, sale preservation and isolated faster-exit tests; full Python suite, JavaScript and desktop/mobile browser checks before signed publication.

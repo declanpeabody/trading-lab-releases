@@ -372,7 +372,7 @@ def monitoring_status(directory):
     result['benchmark']=state.get('benchmark')
     result['positions']=positions
     scan=state.get('scanner',{})
-    result['scanner']={key:scan.get(key) for key in ('updated_at','decision_at','target_count','universe_count','histories_ready','ranked_histories','histories_pending','selected','checked','decision_state','quote_failures','history_failures','holdings_checked_at','optional_error','quote_wait_seconds')}
+    result['scanner']={key:scan.get(key) for key in ('updated_at','decision_at','target_count','universe_count','histories_ready','ranked_histories','histories_pending','selected','checked','decision_state','quote_failures','history_failures','holdings_checked_at','optional_error','quote_wait_seconds','focus_target','focus_ready','history_policy','replacement_priority')}
     try:
         with closing(monitor_db(directory,'api_budget.sqlite3')) as db:
             used=db.execute('SELECT n FROM usage WHERE day=?',(now.date().isoformat(),)).fetchone()
