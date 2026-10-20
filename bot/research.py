@@ -7,7 +7,7 @@ import io
 import json
 from pathlib import Path
 import threading
-from ranked_backtest import dates, parse_series, run, walk_forward, run_batched
+from ranked_backtest import dates, parse_series, run, walk_forward, run_batched, stress_test, validate_dividends
 from strategy import WATCHLIST, screening_universe
 from scanner import catalogue
 from market import Market, MarketUnavailable, BudgetDeferred
@@ -30,22 +30,30 @@ class Research:
         if not isinstance(options,dict):raise ValueError('Invalid research options.')
         start,end=str(options.get('start','')),str(options.get('end',''))
         mode=options.get('mode','historical')
-        if mode not in ('historical','walk_forward','scanner_replay'):raise ValueError('Unknown research mode')
+        if mode not in ('historical','walk_forward','scanner_replay','stress'):raise ValueError('Unknown research mode')
         dates(start,end)
         slip=float(options.get('slippage_bps',25));fee=float(options.get('fx_fee_bps',15))
         if not (0<=slip<=200 and 0<=fee<=200):raise ValueError('Cost allowances must be 0–200 basis points.')
+        stress_options={}
+        if mode=='stress':
+            capital=float(options.get('initial_gbp',10000));cap=int(options.get('purchase_limit',1000));spread=float(options.get('spread_bps',10))
+            if not all(math.isfinite(x) for x in (capital,spread)) or not 100<=capital<=1000000 or cap not in (100,150,200,1000) or cap>capital or not 0<=spread<=200:raise ValueError('Invalid stress-test capital, purchase cap or spread')
+            dividend_rows=validate_dividends(options.get('dividends',[]),start,end)
+            stress_options=dict(initial_gbp=capital,purchase_limit=cap,spread_bps=spread,dividends=dividend_rows)
         with self.lock:
             if self.busy:raise ValueError('A historical test is already running.')
             self.busy=True;self.error=None
-        threading.Thread(target=self._job,args=(start,end,slip,fee,options.get('refresh') is True,mode),daemon=True).start()
+        threading.Thread(target=self._job,args=(start,end,slip,fee,options.get('refresh') is True,mode,stress_options),daemon=True).start()
 
-    def _job(self,start,end,slip,fee,refresh,mode="historical"):
+    def _job(self,start,end,slip,fee,refresh,mode="historical",stress_options=None):
         try:
             a,b=dates(start,end);warm=(a-timedelta(days=150)).isoformat()
             data={};provenance={};market=Market()
             mapping=catalogue(market.get('stocks',purpose='research',country='United States',type='Common Stock')['data'])
             if mode!='scanner_replay' and not all(s in mapping for s in WATCHLIST):raise ValueError('Watchlist exchange mappings incomplete; no test run.')
             symbols=screening_universe(mapping) if mode=='scanner_replay' else WATCHLIST
+            if mode=='stress':
+                symbols=(*symbols,'SPY');mapping['SPY']='NYSE Arca'
             unavailable={}
             for symbol in (*symbols,'USD/GBP'):
                 token=hashlib.sha256(f'{symbol}|{mapping.get(symbol)}|{warm}|{end}|splits|rank-v1'.encode()).hexdigest()
@@ -69,6 +77,7 @@ class Research:
                     if mode!='scanner_replay' or symbol=='USD/GBP' or 'Local daily API budget' in str(exc):raise
                     data[symbol]={};unavailable[symbol]=str(exc)[:200]
             report=run_batched(data,mapping,start,end,slip,fee) if mode=='scanner_replay' else run(data,start,end,slip,fee)
+            if mode=='stress':report=stress_test(data,start,end,slip,fee,**(stress_options or {}))
             if mode=='scanner_replay':report['unavailable_histories']=unavailable
             if mode=="walk_forward":
                 report["walk_forward"]=walk_forward(data,start,end,slip,fee)
@@ -1070,3 +1079,316 @@ class DailyLearning:
             except Exception:
                 self.error = 'Daily review failed; existing evidence preserved. Check storage and source records.'
             stop.wait(60)
+
+# Stock Research Desk: descriptive evidence only, never an execution dependency.
+FACT_TAGS = {
+    'revenue': ('RevenueFromContractWithCustomerExcludingAssessedTax','Revenues','SalesRevenueNet'),
+    'income': ('NetIncomeLoss','ProfitLoss'),
+    'operating_cash': ('NetCashProvidedByUsedInOperatingActivities',),
+    'capex': ('PaymentsToAcquirePropertyPlantAndEquipment',),
+    'eps': ('EarningsPerShareDiluted',),
+    'debt': ('LongTermDebtCurrent','LongTermDebtNoncurrent'),
+    'cash': ('CashAndCashEquivalentsAtCarryingValue',),
+    'shares': ('CommonStockSharesOutstanding',),
+}
+
+
+def finite_number(value):
+    if isinstance(value,bool):return None
+    try:value=float(value)
+    except (ValueError,TypeError):return None
+    return value if math.isfinite(value) else None
+
+
+def company_facts(payload, cik, seen):
+    """Conservative annual analysis: exact periods, known filing dates, no TTM invention.
+
+    A filing date has no time, so same-day filings wait until the following day.
+    Store the facts used and their accession; later restatements create new snapshots.
+    """
+    from datetime import date
+    if int(payload.get('cik',-1)) != int(cik):raise ValueError('Company facts identity mismatch')
+    gaap=payload.get('facts',{}).get('us-gaap',{})
+    records={}
+    for metric,tags in FACT_TAGS.items():
+        unit='USD/shares' if metric=='eps' else 'shares' if metric=='shares' else 'USD'
+        selected=[]
+        for tag in tags:
+            candidates=[]
+            for r in gaap.get(tag,{}).get('units',{}).get(unit,[]):
+                try:
+                    end=date.fromisoformat(r['end']);filed=date.fromisoformat(r['filed'])
+                    start=date.fromisoformat(r['start']) if r.get('start') else None
+                    val=finite_number(r['val'])
+                    if val is None or not end<=filed<seen.date() or r.get('form') not in ('10-K','10-K/A','10-Q','10-Q/A','20-F','20-F/A'):continue
+                    annual=metric in ('revenue','income','operating_cash','capex','eps')
+                    if annual and (start is None or not 350<=(end-start).days<=380):continue
+                    if not annual and start is not None:continue
+                    candidates.append(dict(value=val,start=start.isoformat() if start else None,end=end.isoformat(),
+                        filed=filed.isoformat(),accession=r.get('accn'),tag=tag,unit=unit))
+                except (ValueError,KeyError,TypeError):continue
+            # Tags are alternatives, except the two explicitly additive debt components.
+            if candidates:
+                latest={}
+                for r in sorted(candidates,key=lambda x:x['filed']):latest[(r['start'],r['end'])]=r
+                selected.extend(sorted(latest.values(),key=lambda x:x['end'],reverse=True)[:8])
+                if metric!='debt':break
+        records[metric]=selected
+    def latest(key):return records[key][0] if records[key] else None
+    def aligned(a,b):return a and b and (a['start'],a['end'])==(b['start'],b['end'])
+    def growth(key):
+        rows=records[key]
+        if len(rows)<2:return None
+        a,b=rows[:2]
+        if not 330<=(date.fromisoformat(a['end'])-date.fromisoformat(b['end'])).days<=400 or b['value']<=0:return None
+        return 100*(a['value']/b['value']-1)
+    rev,inc,op,cap=map(latest,('revenue','income','operating_cash','capex'))
+    debt=records['debt'];debt_value=None
+    if len({x['tag'] for x in debt})==2:
+        components=[next(x for x in debt if x['tag']==tag) for tag in FACT_TAGS['debt']]
+        if components[0]['end']==components[1]['end']:debt_value=sum(x['value'] for x in components)
+    fcf=op['value']-cap['value'] if aligned(op,cap) and cap['value']>=0 else None
+    margin=100*inc['value']/rev['value'] if aligned(rev,inc) and rev['value']>0 else None
+    # Dilution compares year-end share counts about one year apart, not adjacent quarters.
+    shares=latest('shares');dilution=None
+    if shares:
+        older=[r for r in records['shares'][1:] if 330<=(date.fromisoformat(shares['end'])-date.fromisoformat(r['end'])).days<=400 and r['value']>0]
+        if older:dilution=100*(shares['value']/older[0]['value']-1)
+    metrics=dict(revenue_growth_pct=growth('revenue'),net_margin_pct=margin,free_cash_flow_usd=fcf,
+        debt_usd=debt_value,cash_usd=latest('cash')['value'] if latest('cash') else None,share_growth_pct=dilution)
+    return dict(company=payload.get('entityName',''),cik=int(cik),first_seen=seen.isoformat(),
+        source_url=f'https://data.sec.gov/api/xbrl/companyfacts/CIK{int(cik):010}.json',
+        payload_sha256=hashlib.sha256(json.dumps(payload,sort_keys=True,allow_nan=False).encode()).hexdigest(),
+        records=records,metrics=metrics,period_end=rev['end'] if rev else None,
+        basis='Latest reported annual USD figures; not trailing twelve months. Custom/IFRS tags and unsupported periods remain unknown.')
+
+
+def price_context(rows, today):
+    """Validate cached bars before descriptive analysis; reject duplicates/stale data."""
+    from datetime import date
+    issues=[];clean=[]
+    try:
+        for r in rows:
+            day=date.fromisoformat(r['datetime'][:10]);close=finite_number(r.get('close'))
+            if close is None or close<=0 or day>=today:raise ValueError()
+            clean.append((day.isoformat(),close))
+        if len({d for d,p in clean})!=len(clean):raise ValueError()
+        clean.sort()
+        if len(clean)<50:issues.append('Fewer than 50 completed sessions')
+        if not clean or not 0<=(today-date.fromisoformat(clean[-1][0])).days<=4:issues.append('Stale or absent price history')
+        if any(abs(b[1]/a[1]-1)>.4 for a,b in zip(clean,clean[1:])):issues.append('Large discontinuity; check corporate actions')
+    except (KeyError,TypeError,ValueError):issues.append('Invalid or duplicate price bars')
+    if issues:return dict(issues=issues,usable=False)
+    values=[p for d,p in clean];fast=mean(values[-20:]);slow=mean(values[-50:])
+    return dict(usable=True,issues=[],as_of=clean[-1][0],price_usd=values[-1],sma20=fast,sma50=slow,
+        return_20_pct=100*(values[-1]/values[-21]-1),trend='Rising' if values[-1]>fast>slow else 'Falling' if values[-1]<fast<slow else 'Mixed',
+        dates=[d for d,p in clean[-21:]],returns=[b/a-1 for a,b in zip(values[-21:],values[-20:])])
+
+
+def return_correlation(a,b):
+    if not a.get('usable') or not b.get('usable') or a['dates']!=b['dates']:return None
+    x,y=a['returns'],b['returns'];mx,my=mean(x),mean(y)
+    denom=(sum((v-mx)**2 for v in x)*sum((v-my)**2 for v in y))**.5
+    return sum((v-mx)*(w-my) for v,w in zip(x,y))/denom if denom>1e-12 else None
+
+
+class StockDesk:
+    """Local point-in-time company snapshots and a read-only portfolio research view."""
+    def __init__(self,directory):self.directory=Path(directory);self.path=self.directory/'stock-desk.sqlite3'
+    @contextmanager
+    def connect(self):
+        self.directory.mkdir(parents=True,exist_ok=True)
+        with closing(sqlite3.connect(self.path,timeout=3)) as db,db:
+            db.execute('CREATE TABLE IF NOT EXISTS facts(symbol TEXT,seen TEXT,body TEXT,PRIMARY KEY(symbol,seen))')
+            db.execute('CREATE TABLE IF NOT EXISTS profiles(symbol TEXT PRIMARY KEY,body TEXT)')
+            db.execute('CREATE TABLE IF NOT EXISTS attempts(symbol TEXT PRIMARY KEY,at TEXT,error TEXT)')
+            db.execute('CREATE TABLE IF NOT EXISTS calendar(id TEXT PRIMARY KEY,body TEXT)')
+            db.execute('CREATE TABLE IF NOT EXISTS calendar_history(id TEXT,seen TEXT,body TEXT)')
+            yield db
+    def profile(self,symbol,payload,seen):
+        sic=str(payload.get('sic',''))
+        profile=dict(company=payload.get('name',symbol),sic=sic,industry=payload.get('sicDescription') or 'Unknown',
+            industry_group=sic[:2] if len(sic)==4 and sic.isdigit() else None,seen=seen.isoformat())
+        with self.connect() as db:db.execute('INSERT OR REPLACE INTO profiles VALUES(?,?)',(symbol,json.dumps(profile)))
+    def refresh_due(self,symbol,now):
+        with self.connect() as db:row=db.execute('SELECT at FROM attempts WHERE symbol=?',(symbol,)).fetchone()
+        return row is None or (now-datetime.fromisoformat(row[0])).total_seconds()>=86400
+    def refresh(self,symbol,cik,client,now):
+        if not self.refresh_due(symbol,now):return False
+        with self.connect() as db:db.execute('INSERT OR REPLACE INTO attempts VALUES(?,?,?)',(symbol,now.isoformat(),'Refresh incomplete'))
+        try:
+            body=company_facts(client.get(f'https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010}.json'),cik,now)
+            try:
+                cached=json.loads((self.directory/'ranked-daily.json').read_text())
+                rows=(cached.get('previous_bars',{})|cached.get('bars',{})).get(symbol,[])
+                observed=price_context(rows,now.astimezone(NY).date())
+                body['observed_price']={k:v for k,v in observed.items() if k not in ('returns','dates')}
+            except (OSError,ValueError,TypeError,KeyError):body['observed_price']={'usable':False,'issues':['Price unavailable at facts collection']}
+            with self.connect() as db:
+                # Bounded append-only history: never overwrite earlier evidence with restatements.
+                db.execute('INSERT OR IGNORE INTO facts VALUES(?,?,?)',(symbol,now.isoformat(),json.dumps(body,allow_nan=False)))
+                db.execute('DELETE FROM facts WHERE seen < ?',((now-timedelta(days=730)).isoformat(),))
+                db.execute('DELETE FROM facts WHERE rowid NOT IN (SELECT rowid FROM facts ORDER BY seen DESC LIMIT 10000)')
+                db.execute('UPDATE attempts SET error=NULL WHERE symbol=?',(symbol,))
+        except Exception:
+            with self.connect() as db:db.execute('UPDATE attempts SET error=? WHERE symbol=?',('SEC facts unavailable; earlier evidence retained',symbol))
+        return True
+    def save_event(self,payload,now=None):
+        import re,uuid
+        from urllib.parse import urlsplit
+        now=now or datetime.now(timezone.utc)
+        symbol=str(payload.get('symbol','')).strip().upper();at=datetime.fromisoformat(str(payload.get('at','')).replace('Z','+00:00'))
+        source=str(payload.get('source','')).strip();url=urlsplit(source);verified=payload.get('verified',False)
+        if not re.fullmatch(r'[A-Z][A-Z0-9.-]{0,9}',symbol) or at.tzinfo is None or not now<at<=now+timedelta(days=366):raise ValueError('Use a symbol and future event time with timezone, within one year.')
+        if len(source)>500 or url.scheme!='https' or not url.hostname or url.username or url.password or type(verified) is not bool:raise ValueError('Use an HTTPS source and a true/false verification flag.')
+        kind=payload.get('kind','earnings')
+        if kind not in ('earnings','investor_day','other'):raise ValueError('Unknown event kind')
+        ident=str(payload.get('id') or uuid.uuid4().hex)
+        if not re.fullmatch(r'[a-f0-9]{32}',ident):raise ValueError('Invalid event identity')
+        with self.connect() as db:
+            old=db.execute('SELECT body FROM calendar WHERE id=?',(ident,)).fetchone()
+            if payload.get('id') and not old:raise ValueError('Event no longer exists; reload')
+            if db.execute('SELECT COUNT(*) FROM calendar').fetchone()[0]>=1000 and not old:raise ValueError('Event limit reached')
+            previous=json.loads(old[0]) if old else None
+            body=dict(id=ident,symbol=symbol,at=at.astimezone(timezone.utc).isoformat(),source=source,kind=kind,
+                verification='User verified against source' if verified else 'Unverified',verified_at=now.isoformat() if verified else None,
+                first_seen=previous['first_seen'] if previous else now.isoformat(),updated_at=now.isoformat(),
+                revision=previous['revision']+1 if previous else 1,previous_at=previous['at'] if previous else None)
+            db.execute('INSERT OR REPLACE INTO calendar VALUES(?,?)',(ident,json.dumps(body)))
+            db.execute('INSERT INTO calendar_history VALUES(?,?,?)',(ident,now.isoformat(),json.dumps(body)))
+            db.execute('DELETE FROM calendar_history WHERE rowid NOT IN (SELECT rowid FROM calendar_history ORDER BY rowid DESC LIMIT 10000)')
+        return body
+    def state(self,account,news=None,now=None):
+        from datetime import date
+        now=now or datetime.now(timezone.utc);errors=[]
+        with self.connect() as db:
+            snapshots=[json.loads(r[0])|{'symbol':r[1]} for r in db.execute('SELECT body,symbol FROM facts WHERE seen<=? ORDER BY seen',(now.isoformat(),))]
+            profiles={s:json.loads(b) for s,b in db.execute('SELECT symbol,body FROM profiles')}
+            attempts={s:dict(at=a,error=e) for s,a,e in db.execute('SELECT symbol,at,error FROM attempts')}
+            events=[json.loads(r[0]) for r in db.execute('SELECT body FROM calendar')]
+        latest={x['symbol']:x for x in snapshots};historical={}
+        for x in snapshots:historical.setdefault(x['symbol'],[]).append(x)
+        try:cache=json.loads((self.directory/'ranked-daily.json').read_text())
+        except FileNotFoundError:cache={}
+        except (OSError,ValueError):cache={};errors.append('Price cache unavailable')
+        bars=cache.get('previous_bars',{})|cache.get('bars',{})
+        contexts={s:price_context(rows,now.astimezone(NY).date()) for s,rows in bars.items()}
+        positions=account.get('positions',{});marks=account.get('marks',{});fx=finite_number(account.get('fx'));equity=finite_number(account.get('equity'))
+        selected=account.get('scanner',{}).get('selected',[])
+        symbols=list(dict.fromkeys([*positions,*selected,*sorted(set(latest)|set(contexts))]))[:300]
+        exposure={};unknown_exposure=0;values={}
+        for s,p in positions.items():
+            mark=finite_number(marks.get(s));qty=finite_number(p.get('qty'))
+            value=mark*qty*fx if mark and qty and fx and mark>0 and qty>0 and fx>0 else None;values[s]=value
+            group=profiles.get(s,{}).get('industry_group')
+            if value is not None and group:exposure[group]=exposure.get(group,0)+value
+            else:unknown_exposure+=1
+        news_events=(news or {}).get('events',[]);cards=[]
+        for s in symbols:
+            f=latest.get(s);p=contexts.get(s,dict(usable=False,issues=['No cached history']));profile=profiles.get(s,{})
+            missing=list(p['issues']);metrics=f['metrics'] if f else {};records=f['records'] if f else {}
+            price=p.get('price_usd');valuation={};fresh_facts=False
+            if f:
+                age=(now-datetime.fromisoformat(f['first_seen'])).total_seconds()/86400
+                if age>7:missing.append('Company facts have not refreshed within seven days')
+                if f['period_end']:
+                    fresh_facts=(now.date()-date.fromisoformat(f['period_end'])).days<=550 and age<=7
+                    if not fresh_facts:missing.append('Annual facts are stale or refresh overdue')
+                else:missing.append('Comparable annual revenue unavailable')
+            else:missing.append('Company facts not yet collected')
+            def fact(key):return records.get(key,[None])[0] if records.get(key) else None
+            eps,rev,shares,op,cap=map(fact,('eps','revenue','shares','operating_cash','capex'))
+            if price and fresh_facts:
+                if eps and eps['value']>0 and rev and eps['end']==rev['end']:valuation['annual_pe']=price/eps['value']
+                else:missing.append('Annual P/E unavailable: loss, absent EPS or mismatched period')
+                if shares and shares['value']>0 and (now.date()-date.fromisoformat(shares['end'])).days<=150:
+                    mcap=price*shares['value'];valuation['approx_market_cap_usd']=mcap
+                    if rev and rev['value']>0:valuation['annual_price_sales']=mcap/rev['value']
+                    if metrics.get('free_cash_flow_usd') is not None and rev and op and cap and op['end']==rev['end']:valuation['annual_fcf_yield_pct']=100*metrics['free_cash_flow_usd']/mcap
+                else:missing.append('Recent share count unavailable for market-cap ratios')
+            same_grid=[(k,c) for k,c in contexts.items() if k!=s and c.get('usable') and p.get('usable') and c['dates']==p['dates']]
+            peer_group=profile.get('industry_group')
+            peers=[(k,c) for k,c in same_grid if peer_group and profiles.get(k,{}).get('industry_group')==peer_group]
+            market_return=mean(c['return_20_pct'] for k,c in same_grid) if len(same_grid)>=20 else None
+            sector_return=mean(c['return_20_pct'] for k,c in peers) if len(peers)>=3 else None
+            breadth=mean(c['price_usd']>c['sma50'] for k,c in same_grid) if len(same_grid)>=20 else None
+            context=dict(sample_size=len(same_grid),peer_count=len(peers),industry_group=peer_group,
+                market_relative_20_pct=p['return_20_pct']-market_return if market_return is not None else None,
+                industry_relative_20_pct=p['return_20_pct']-sector_return if sector_return is not None else None,
+                regime='Broad rise in covered sample' if breadth is not None and breadth>=.6 else 'Broad weakness in covered sample' if breadth is not None and breadth<=.4 else 'Mixed covered sample' if breadth is not None else 'Unknown',
+                above_50_fraction=breadth,basis='Equal-weight aligned cached stocks excluding this stock; partial sample, not a market index. SIC two-digit industry peers, not formal sectors.')
+            if market_return is None:missing.append('Fewer than 20 aligned market-comparison stocks')
+            if sector_return is None:missing.append('Fewer than three aligned industry peers')
+            correlations={k:return_correlation(p,contexts.get(k,{})) for k in positions if k!=s}
+            cash=finite_number(account.get('cash'));limit=finite_number(account.get('account_limits',{}).get('purchase_cap',200));slots=account.get('account_limits',{}).get('max_positions',5)
+            budget=min(cash,limit) if cash is not None and limit is not None else 0
+            group_value=exposure.get(peer_group,0) if peer_group else None
+            fit=dict(held=s in positions,available_slots=max(0,slots-len(positions)),hypothetical_purchase_gbp=budget,
+                industry_exposure_pct=100*group_value/equity if group_value is not None and equity and equity>0 else None,
+                after_purchase_industry_pct=100*(group_value+budget)/equity if s not in positions and group_value is not None and equity and equity>0 else None,
+                correlations=correlations,unknown_holding_values_or_industries=unknown_exposure,account_at=account.get('last_success'),flags=[])
+            try:
+                account_age=(now-datetime.fromisoformat(account.get('last_success') or '')).total_seconds()
+                if not 0<=account_age<=3600:fit['flags'].append('Account marks older than one hour; refresh before relying on exposure')
+            except (ValueError,TypeError):fit['flags'].append('Account mark freshness unknown')
+            if s not in positions and not fit['available_slots']:fit['flags'].append('No free position slots')
+            if any(c is not None and c>.8 for c in correlations.values()):fit['flags'].append('High observed correlation with a holding')
+            if any(c is None for c in correlations.values()):fit['flags'].append('Some holding correlations are unknown')
+            if fit['after_purchase_industry_pct'] is not None and fit['after_purchase_industry_pct']>40:fit['flags'].append('Illustrative purchase would exceed 40% in this SIC group')
+            relevant=sorted([e for e in news_events if e.get('symbol')==s],key=lambda e:e.get('first_seen',''),reverse=True)
+            # Accession identity deduplicates repeated headlines; text changes are not guidance direction.
+            unique={e.get('accession',e.get('first_seen')):e for e in reversed(relevant)}
+            catalysts=list(reversed(list(unique.values())))[:10]
+            guidance=[]
+            for e in catalysts:
+                doc=e.get('document')
+                if isinstance(doc,dict):
+                    for excerpt in doc.get('evidence',[]):
+                        if excerpt.get('term')=='guidance':guidance.append(dict(text=excerpt['excerpt'],source=e.get('source_url'),first_seen=e.get('first_seen')))
+            future=[e for e in events if e['symbol']==s and datetime.fromisoformat(e['at'])>=now]
+            bull=[];bear=[];invalidate=[]
+            if metrics.get('revenue_growth_pct') is not None:
+                (bull if metrics['revenue_growth_pct']>0 else bear).append(f"Reported annual revenue growth {metrics['revenue_growth_pct']:.1f}%")
+                invalidate.append('Reassess when a new filing changes revenue growth or margins')
+            if metrics.get('free_cash_flow_usd') is not None:
+                (bull if metrics['free_cash_flow_usd']>0 else bear).append('Positive reported annual free cash flow' if metrics['free_cash_flow_usd']>0 else 'Non-positive reported annual free cash flow')
+            if p.get('usable'):
+                (bull if p['trend']=='Rising' else bear).append('Price trend: '+p['trend'].lower())
+                invalidate.append('Reassess price trend on the next completed session')
+            if any(e.get('flag')=='Risk review' for e in catalysts):bear.append('Recent SEC metadata flags a risk item; inspect the filing')
+            bear.extend(fit['flags'])
+            if not future:missing.append('Upcoming event coverage unknown')
+            if not guidance:missing.append('Guidance evidence unavailable')
+            history=historical.get(s,[])
+            changes=[]
+            if len(history)>1:
+                previous=next((x for x in reversed(history[:-1]) if x['payload_sha256']!=f['payload_sha256']),None)
+                if previous:
+                    changes=[dict(metric=k,previous=previous['metrics'].get(k),current=v) for k,v in metrics.items() if previous['metrics'].get(k)!=v]
+            valuation_history=[]
+            for snap in history:
+                prior_price=snap.get('observed_price',{});prior_eps=snap['records'].get('eps',[])
+                if prior_price.get('usable') and prior_eps and prior_eps[0]['value']>0 and prior_eps[0]['end']==snap.get('period_end') and (datetime.fromisoformat(snap['first_seen']).date()-date.fromisoformat(prior_eps[0]['end'])).days<=550:
+                    valuation_history.append(dict(observed_at=snap['first_seen'],price_date=prior_price['as_of'],annual_pe=prior_price['price_usd']/prior_eps[0]['value'],period_end=prior_eps[0]['end']))
+            # One observation per completed price date; repeated refreshes are not new evidence.
+            valuation_history=list({x['price_date']:x for x in valuation_history}.values())
+            cards.append(dict(symbol=s,company=f['company'] if f else profile.get('company',s),industry=profile.get('industry','Unknown'),
+                fundamentals=f,valuation=valuation,valuation_basis='Annual ratios using last completed close and latest eligible filed shares; share-basis changes need review. Not fair-value estimates.',
+                technical={k:v for k,v in p.items() if k not in ('returns','dates')},context=context,portfolio_fit=fit,
+                bull_case=bull,bear_case=bear,invalidation=invalidate,missing=missing,catalysts=catalysts,events=future,
+                guidance=dict(excerpts=guidance,text_changed=len(guidance)>=2 and guidance[0]['text']!=guidance[1]['text'],interpretation='Text difference only; direction, newness and earnings surprise require review.'),
+                fundamental_changes=changes,valuation_history=valuation_history,refresh=attempts.get(s),sources=[f['source_url']] if f else []))
+        # Comparable peers only: same industry, annual period ends within 100 days.
+        from statistics import median
+        for card in cards:
+            end=(card['fundamentals'] or {}).get('period_end');group=card['context']['industry_group'];comparison={}
+            for key,value in card['valuation'].items():
+                if key=='approx_market_cap_usd':continue
+                peer_values=[c['valuation'][key] for c in cards if c is not card and group and c['context']['industry_group']==group and key in c['valuation'] and end and (c['fundamentals'] or {}).get('period_end') and abs((date.fromisoformat(end)-date.fromisoformat(c['fundamentals']['period_end'])).days)<=100]
+                comparison[key]=dict(peer_count=len(peer_values),peer_median=median(peer_values) if len(peer_values)>=3 else None)
+            card['valuation_peers']=comparison
+            own=[x['annual_pe'] for x in card['valuation_history']]
+            card['valuation_history_summary']=dict(observations=len(own),annual_pe_median=median(own) if len(own)>=3 else None,basis='Observed annual P/E since installation only; minimum three distinct completed price dates. Not a long-term fair-value estimate.')
+        return dict(as_of=now.isoformat(),mode='Observation and paper research only',cards=cards,events=events,errors=errors,
+            facts_covered=len(latest),price_covered=sum(p.get('usable',False) for p in contexts.values()),
+            note='No trading instructions or probability of profit. SEC facts refresh at most daily per stock, two requests per enabled news poll; configure SEC contact in News. Unsupported tags remain unknown. Snapshots retained for two years up to 10,000; event revisions up to 10,000. New facts are usable only from first collection, never backfilled into old decisions. Price histories are provider split-adjusted; suspicious discontinuities are blocked. Calendar verification is user-attested; no automatic future earnings or consensus feed. Industry exposure uses account marks at the displayed account timestamp. Research flags do not change active risk limits.')

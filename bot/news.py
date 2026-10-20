@@ -109,7 +109,8 @@ class SecClient:
 
     def get(self, url):
         if not (url == 'https://www.sec.gov/files/company_tickers.json' or
-                re.fullmatch(r'https://data.sec.gov/submissions/CIK\d{10}\.json', url)):
+                re.fullmatch(r'https://data.sec.gov/submissions/CIK\d{10}\.json', url) or
+                re.fullmatch(r'https://data.sec.gov/api/xbrl/companyfacts/CIK\d{10}\.json', url)):
             raise ValueError('SEC endpoint not permitted')
         with self.lock:
             time.sleep(max(0, 1.1 - (time.monotonic()-SecClient.last)))
@@ -229,6 +230,10 @@ class News:
                     payload=client.get(f'https://data.sec.gov/submissions/CIK{cik:010}.json')
                     seen=datetime.now(timezone.utc)
                     events=events_from(payload,symbol,cik,seen)
+                    try:
+                        from research import StockDesk
+                        StockDesk(self.directory.parent).profile(symbol,payload,seen)
+                    except (OSError,ValueError,sqlite3.Error):pass
                     for event in events:
                         with self.lock:
                             old=self.db.execute('SELECT body FROM events WHERE id=?',(f'{symbol}:{event["accession"]}',)).fetchone()
@@ -257,6 +262,15 @@ class News:
                             self.db.execute('INSERT OR IGNORE INTO events VALUES (?,?)',
                                 (f'{symbol}:{event["accession"]}',json.dumps(event,allow_nan=False)))
                     coverage.append({'symbol':symbol,'checked_at':seen.isoformat(),'status':f'Checked; {len(events)} relevant filings in 7-day window'})
+                # Separate bounded facts requests; failures never invalidate filing coverage.
+                try:
+                    from research import StockDesk
+                    desk=StockDesk(self.directory.parent);facts_budget=2
+                    for symbol in selected:
+                        if not self.config['enabled'] or not facts_budget:break
+                        if symbol in self.mapping and desk.refresh(symbol,self.mapping[symbol],client,datetime.now(timezone.utc)):facts_budget-=1
+                except (OSError,ValueError,sqlite3.Error):
+                    self.info['facts_error']='Company fact storage unavailable'
                 with self.lock:
                     if self.config['enabled']:
                         self.info['last_success']=datetime.now(timezone.utc).isoformat()

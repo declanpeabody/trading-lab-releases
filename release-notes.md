@@ -1,11 +1,12 @@
-2026.10.20.3 — Daily learning and controlled strategy candidates
+2026.10.20.4 — Stock Research Desk and portfolio stress tests
 
-- Adds Daily Learning: one local review per weekday after 18:00 New York while the app is running. Reviews persist across restarts; missed review days are not reconstructed.
-- Reviews matured 120-hour signal outcomes, detailed closed trades, modelled costs and hypothetical missed BUY observations. Pending and missing outcomes remain distinct from losses.
-- Adds descriptive source/model scorecards. News remains context, not a directional prediction; scores do not establish predictive skill.
-- Compares the existing 20/50 and 10/30 trend models. Selection freezes a candidate and requires later, previously unseen observations before proposing review. Insufficient evidence explicitly produces no change.
-- Writes versioned candidate Python source from two validated templates. No unrestricted code rewriting, dynamic execution of generated code or automatic deployment. Active account, risk controls and request budgets remain unchanged.
-- No new market-data calls or paid model subscriptions. Source journal remains capped at 10,000 records; daily reviews retain 366 dates.
-- Install through Software Updates. Daily Learning starts automatically; no comparison reset is needed. Keep the app running for scheduled reviews.
+- Adds all seven research areas: company fundamentals, valuation, market/industry context, earnings and catalyst tracking, portfolio-fit analysis, sourced stock reports and more realistic portfolio evaluation.
+- SEC annual company facts include growth, margins, cash flow, cash/debt components and share changes. Preserves received dates, filing periods, accessions, hashes and revisions. Requires existing SEC contact/monitoring in News; at most two additional SEC requests per poll and one attempt per stock per day for held/selected names. Unsupported data remains unknown.
+- Stock Research Desk shows annual valuation ratios and eligible peer medians, aligned relative performance, portfolio concentration/correlation flags, supporting/opposing evidence and reassessment conditions. Uses cached prices with no additional market-data requests. Partial universe/industry coverage is explicit.
+- Adds user-verified upcoming events with revision history, deduplicated filing catalysts and guidance-excerpt comparisons. Future earnings dates are user supplied; no automatic calendar or analyst-consensus feed. Text changes are not inferred earnings surprises.
+- Adds on-demand portfolio stress mode with £10,000/£1,000 defaults, spread/slippage/FX assumptions, SPY comparison, overnight-gap reporting and optional user-supplied dividend accounting. Historical entitlements and existing request budgets apply; an uncached stress run adds one SPY history request. No dividend input means price-return-only results.
+- Preserves active paper trades, risk limits, existing learning candidates and updater compatibility. No unrestricted self-rewriting, automatic promotion or paid subscriptions.
 
-Validation: full Python regression, authenticated read-only endpoint, forward-data separation, candidate integrity and failure isolation; JavaScript and desktop/mobile browser checks.
+Install through Software Updates, then open Stock Research Desk. No comparison reset required. Full methodology and data limits: docs/stock-research-desk.md.
+
+Validation: targeted financial-accounting, evidence provenance, access-control and integration tests, full regression suite, JavaScript syntax and desktop/mobile browser checks before publication.

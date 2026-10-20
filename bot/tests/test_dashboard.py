@@ -228,4 +228,21 @@ class DashboardTests(unittest.TestCase):
             self.assertFalse(state['automatic_deployment'])
             self.assertEqual(self.ledger.read(),before)
 
+
+    def test_stock_desk_authentication_csrf_and_event_revision(self):
+        with patch.dict('os.environ',{'DATA_DIR':self.temp.name}):
+            with self.assertRaises(HTTPError) as error:self.get('/api/stock-desk',False)
+            self.assertEqual(error.exception.code,401)
+            with self.get('/api/stock-desk') as r:self.assertEqual(json.load(r)['cards'],[])
+            from datetime import datetime,timedelta,timezone
+            body=json.dumps(dict(symbol='TEST',at=(datetime.now(timezone.utc)+timedelta(days=5)).isoformat(),source='https://example.com/ir',verified=True)).encode()
+            headers={'Authorization':self.auth,'Content-Type':'application/json'}
+            with self.assertRaises(HTTPError) as error:urlopen(Request(self.base+'/api/stock-desk',data=body,headers=headers),timeout=2)
+            self.assertEqual(error.exception.code,403)
+            with self.get('/api/state') as r:headers['X-CSRF-Token']=json.load(r)['csrf']
+            before=self.ledger.read()
+            with urlopen(Request(self.base+'/api/stock-desk',data=body,headers=headers),timeout=2) as r:self.assertEqual(r.status,200)
+            with self.get('/api/stock-desk') as r:self.assertEqual(json.load(r)['events'][0]['verification'],'User verified against source')
+            self.assertEqual(self.ledger.read(),before)
+
 if __name__ == '__main__': unittest.main()

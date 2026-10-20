@@ -15,3 +15,20 @@ state['session_scorecard']={'note':'Synthetic session fixture','sessions':[{'day
 state['accounting']['closed_reviews']=[{'symbol':'TEST','reason':'Trend exit','realised_pnl_gbp':5,'at':'2026-10-16T15:00:00Z','entry_at':'2026-10-15T15:00:00Z','entry_basis_usd':100,'entry_evidence':{'quote_usd':99.75,'sma20':98,'sma50':96},'trade_review':{'low_usd':99,'high_usd':110,'observations':12,'partial':False}}]
 Path('/tmp/overview18-fixture.json').write_text(json.dumps(state))
 Path('/tmp/research18.html').write_text(Path('bot/research.html').read_text().replace('__TOP_NAV__',top_navigation('/research','preview')).replace('__NONCE__','preview'))
+# Synthetic Stock Research Desk and stress-test fixtures; never real account data.
+import tempfile,copy
+from datetime import datetime,timezone
+from research import StockDesk
+with tempfile.TemporaryDirectory() as d:
+    desk=StockDesk(d)
+    desk_fixture=desk.state(state,now=datetime(2026,10,20,23,tzinfo=timezone.utc))
+    desk_fixture['cards'][0]['company']='<script>untrusted issuer</script>'
+    desk_fixture['cards'][0]['sources']=['javascript:alert(1)','https://www.sec.gov/']
+    desk_fixture['events']=[dict(id='a'*32,symbol='TEST',at='2026-11-01T21:00:00Z',kind='earnings',source='https://example.com/ir',verification='User verified against source',revision=2)]
+    Path('/tmp/stock-desk-fixture.json').write_text(json.dumps(desk_fixture))
+sys.path.insert(0,'bot/tests')
+from test_ranked import fixture as price_fixture
+from ranked_backtest import stress_test
+data,a,b=price_fixture();data['SPY']=copy.deepcopy(data['AAPL'])
+report=stress_test(data,a,b);report.update(created_at='2026-10-20T23:00:00Z',data_source='Synthetic fixture')
+Path('/tmp/stress-fixture.json').write_text(json.dumps(dict(report=report,running=False,error=None)))
