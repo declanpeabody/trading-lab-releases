@@ -199,7 +199,7 @@ class Ledger:
     def trading_signal(self,closes,price):
         return signal(closes,price)
 
-    def cycle(self, prices, histories, fx, date, stamp, symbols=None, history_rows=None, purchase_limit=MAX_POSITION):
+    def cycle(self, prices, histories, fx, date, stamp, symbols=None, history_rows=None, purchase_limit=MAX_POSITION, replacement_candidates=None, replacement_coverage=0):
         # Validate the complete snapshot before touching cash or holdings.
         if not self.valid_purchase_limit(purchase_limit):
             raise ValueError('Purchase setting exceeds the configured paper safety cap')
@@ -237,8 +237,32 @@ class Ledger:
                 messages.append('Total drawdown threshold reached: new buying locked; exits continue.')
             if s['day_block'] and not before['day_block']:
                 messages.append('Daily loss threshold reached: new buying blocked for today; exits continue.')
+            rotation=None
+            if replacement_candidates is not None:
+                from strategy import replacement_review
+                review=replacement_review(s,history_rows or {},prices,signals,date,
+                    replacement_candidates,replacement_coverage,getattr(self,'max_positions',MAX_OPEN),
+                    self.price_allowance,self.fx_allowance)
+                review['at']=stamp
+                if review['eligible']:
+                    old,new=review['outgoing'],review['incoming']
+                    proceeds=s['positions'][old]['qty']*prices[old]*(1-self.price_allowance)*fx*(1-self.fx_allowance)
+                    budget=min(proceeds,purchase_limit,getattr(self,'purchase_cap',MAX_POSITION),
+                               getattr(self,'research_caps',{}).get(new,purchase_limit))
+                    unit=prices[new]*(1+self.price_allowance)*fx*(1+self.fx_allowance)
+                    qty=math.floor(budget/unit*1_000_000)/1_000_000
+                    if qty>0 and qty*unit>=1:
+                        rotation=dict(old=old,new=new,budget=budget,id=uuid.uuid4().hex)
+                    else:review.update(eligible=False,reason='Replacement proceeds below executable purchase minimum')
+                s['replacement_review']=review
+            def reentry_allowed(symbol):
+                last=s.get('replacement_exits',{}).get(symbol)
+                if not last:return True
+                rows=(history_rows or {}).get(symbol,[])
+                return len({r['datetime'][:10] for r in rows if last<r['datetime'][:10]<date})>=5
             # Process all held stocks before candidates, so exits free cash first.
             ordered = list(s['positions']) + [k for k in symbols if k not in s['positions']]
+            if rotation:ordered=list(s['positions'])+[rotation['new']]
             for symbol in ordered:
                 p = s['positions'].get(symbol)
                 if p:
@@ -246,8 +270,9 @@ class Ledger:
                     review.update(observations=review['observations']+int(review.get('last_observed')!=stamp),last_observed=stamp,
                         low_usd=min(review['low_usd'],prices[symbol]),high_usd=max(review['high_usd'],prices[symbol]))
                 action,reason="SKIP","No entry signal"
-                if p and (signals[symbol] == 'sell' or prices[symbol] <= p['entry_usd'] * (1-STOP_FRACTION)):
+                if p and (signals[symbol] == 'sell' or prices[symbol] <= p['entry_usd'] * (1-STOP_FRACTION) or (rotation and symbol==rotation['old'])):
                     action,reason='SELL',('Observed price loss exit' if prices[symbol] <= p['entry_usd']*(1-STOP_FRACTION) else 'Trend exit')
+                    if rotation and symbol==rotation['old']:reason='Portfolio replacement: '+rotation['new']+' passed persistent strength and cost gates'
                     proceeds = p['qty'] * prices[symbol] * (1-self.price_allowance) * fx * (1-self.fx_allowance)
                     s['cash'] += proceeds
                     gross=p['qty']*prices[symbol]*fx
@@ -266,9 +291,10 @@ class Ledger:
                 elif (not p and signals[symbol] == 'buy' and not s['buy_block']
                       and len(s['positions']) < getattr(self,'max_positions',MAX_OPEN)
                       and not s['risk_latched'] and not s['day_block']
-                      and s['last_buy'].get(symbol) != date):
+                      and s['last_buy'].get(symbol) != date and reentry_allowed(symbol)):
                     unit_cost = prices[symbol] * (1+self.price_allowance) * fx * (1+self.fx_allowance)
                     budget = min(purchase_limit, getattr(self,'purchase_cap',MAX_POSITION), s['cash'],getattr(self,'research_caps',{}).get(symbol,purchase_limit))
+                    if rotation:budget=min(budget,rotation['budget'])
                     qty = math.floor(budget / unit_cost * 1_000_000) / 1_000_000
                     cost = qty * unit_cost
                     if qty <= 0 or cost < 1:
@@ -277,6 +303,7 @@ class Ledger:
                     if cost > min(getattr(self,'purchase_cap',MAX_POSITION),purchase_limit) + 1e-8 or cost > s['cash'] + 1e-8:
                         raise ValueError('Budget check failed')
                     action,reason='BUY','Trend entry; controls and budget passed'
+                    if rotation:reason='Portfolio replacement for '+rotation['old']
                     s['cash'] -= cost
                     s['positions'][symbol] = dict(qty=qty, cost_gbp=cost,
                         entry_usd=prices[symbol]*(1+self.price_allowance), opened=stamp)
@@ -301,8 +328,17 @@ class Ledger:
                     elif s['risk_latched']:reason='Total drawdown buying lock'
                     elif s['day_block']:reason='Daily drawdown buying block'
                     elif s['last_buy'].get(symbol)==date:reason='Same-day re-entry blocked'
+                    elif not reentry_allowed(symbol):reason='Five-session replacement re-entry cooldown'
                     elif len(s['positions'])>=getattr(self,'max_positions',MAX_OPEN):reason=('Five-position limit' if getattr(self,'max_positions',MAX_OPEN)==5 else f"{self.max_positions}-position limit")
                 decisions.append(dict(symbol=symbol,action=action,reason=reason,execution_id=executions[-1]['id'] if action in ('BUY','SELL') else None))
+            if rotation:
+                legs=[e for e in executions if e['symbol'] in (rotation['old'],rotation['new'])]
+                if [(e['symbol'],e['side']) for e in legs]!=[(rotation['old'],'SELL'),(rotation['new'],'BUY')]:
+                    raise ValueError('Incomplete replacement rejected; neither leg committed')
+                for e in legs:e.update(replacement_id=rotation['id'],replacement_evidence=copy.deepcopy(s['replacement_review']))
+                s['last_replacement_day']=date
+                s.setdefault('replacement_exits',{})[rotation['old']]=date
+                s['replacement_review'].update(executed=True,replacement_id=rotation['id'])
             s['equity'] = s['cash'] + sum(p['qty'] * prices[k] * fx for k,p in s['positions'].items())
             if s['cash'] < -1e-8:
                 raise ValueError('Negative cash rejected')
@@ -357,3 +393,4 @@ class Ledger:
             observation=dict(day=day,at=at,account_at=account_at,equity_gbp=equity,spy_usd=spy,fx=fx,
                 account_return_pct=100*(equity/b['initial_equity']-1),spy_price_return_pct=100*(spy*fx/b['initial_spy_gbp']-1),cash_return_pct=0)
             b['observations']=(b['observations']+[observation])[-1000:];s['benchmark']=b;self.write(s)
+

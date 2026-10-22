@@ -389,6 +389,8 @@ def monitoring_status(directory):
     result['components']={'monitor_version':VERSION,'monitor_started_at':PROCESS_STARTED_AT,
         'worker_version':result['worker_progress'].get('version'),'worker_started_at':result['worker_progress'].get('started_at'),
         'restart_monitor_required':bool(result['worker_progress'].get('version') and result['worker_progress']['version']!=VERSION)}
+    result['replacement_review']=state.get('replacement_review')
+    result['last_replacement_day']=state.get('last_replacement_day')
     result['performance']=state.get('performance')
     result['benchmark']=state.get('benchmark')
     result['positions']=positions
@@ -542,3 +544,4 @@ if __name__ == '__main__':
         monitoring_stdio(Path(os.getenv('DATA_DIR',str(ROOT/'data'))))
     elif sys.argv[1:]:raise SystemExit('Unknown launch option')
     else:main()
+
