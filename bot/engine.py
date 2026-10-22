@@ -358,6 +358,10 @@ class Ledger:
     def accounting(self,limit=100):
         with self.lock:
             executions=[json.loads(x[0]) for x in self.db.execute('SELECT body FROM executions ORDER BY at DESC,rowid DESC LIMIT ?',(limit,))]
+            closed_positions=[]
+            for (body,) in self.db.execute("SELECT body FROM executions WHERE json_extract(body,'$.side')='SELL' ORDER BY at DESC,rowid DESC"):
+                e=json.loads(body)
+                closed_positions.append({key:e.get(key) for key in ('id','symbol','entry_at','at','quantity','entry_basis_usd','execution_usd','cost_basis_gbp','net_cash_gbp','realised_pnl_gbp','reason','legacy_entry')})
             funding=[json.loads(x[0]) for x in self.db.execute('SELECT body FROM funding ORDER BY at DESC,rowid DESC')]
             summary=self.db.execute("SELECT COUNT(*),COALESCE(SUM(json_extract(body,'$.realised_pnl_gbp')),0),COALESCE(SUM(json_extract(body,'$.price_cost_gbp')+json_extract(body,'$.fx_cost_gbp')),0) FROM executions").fetchone()
             state=self.read();positions=[]
@@ -370,7 +374,7 @@ class Ledger:
                         entry_cost_residual_gbp=p['qty']*p['entry_usd']*entry_fx-p['cost_gbp'])
                 positions.append(row)
             invested=state['equity']-state['cash']
-            return dict(closed_reviews=[e for e in executions if e['side']=='SELL'],open_attribution=positions,exposure_pct=100*invested/state['equity'] if state['equity']>0 else None,
+            return dict(closed_positions=closed_positions,closed_reviews=[e for e in executions if e['side']=='SELL'],open_attribution=positions,exposure_pct=100*invested/state['equity'] if state['equity']>0 else None,
                 performance=state.get('performance'),executions=executions,funding=funding,recorded_executions=summary[0],recorded_realised_gbp=summary[1],recorded_modelled_costs_gbp=summary[2],
                 note='Complete execution records start with this update. Earlier trades are not reconstructed. Recorded realised profit and costs cover these records only; deposits are not profit. Execution costs are assumptions, not broker charges.')
 
