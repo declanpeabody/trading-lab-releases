@@ -8,7 +8,7 @@ permissions:
   contents: read
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   test:
     runs-on: ubuntu-24.04
@@ -31,7 +31,7 @@ jobs:
       - name: Check dashboard desktop and mobile interactions
         run: |
           npm install --prefix /tmp/trading-ui --ignore-scripts playwright@1.58.2
-          /tmp/trading-ui/node_modules/.bin/playwright install --with-deps chromium
+          /tmp/trading-ui/node_modules/.bin/playwright install chromium
           python3 preview_dashboard.py
           PLAYWRIGHT_MODULE=/tmp/trading-ui/node_modules/playwright node check_dashboard.cjs
       - name: Save synthetic dashboard previews

@@ -131,6 +131,16 @@ def no_trade_reasons(state):
     return {'reasons':reasons,'at':scan.get('decision_at',scan.get('updated_at')),'decisions':scan.get('decisions',[])}
 
 
+def holding_exchanges(directory, symbols):
+    """Use the saved catalogue only; opening the dashboard spends no API credits."""
+    try:
+        saved=json.loads((Path(directory)/'scanner.json').read_text())
+        mapping=saved.get('known',{}) | saved.get('universe',{})
+        return {s:mapping[s] for s in symbols if mapping.get(s) in ('NYSE','NASDAQ')}
+    except (OSError,ValueError,TypeError,AttributeError):
+        return {}
+
+
 def handler_factory(ledger, username, password, thread, research=None, news=None, updates=None, journal=None, experiments=None):
     connection_test=ConnectionTest()
     csrf = secrets.token_urlsafe(32)
@@ -180,6 +190,7 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
                         state['active_purchase_limit']=1000 if state.get('account_limits',{}).get('purchase_cap')==1000 else experiments.active_limit()
                         if getattr(experiments,'error',None):state['experiment_error']=experiments.error
                     except Exception:state['experiment_error']='Experiment settings unavailable; check Strategy Experiments.'
+                state['holding_exchanges']=holding_exchanges(os.getenv('DATA_DIR','/data'),state.get('positions',{}))
                 state['csrf'] = csrf
                 state['data_configured'] = bool(os.getenv('TWELVE_DATA_API_KEY'))
                 # Pure local validation also works outside trading hours. Never
