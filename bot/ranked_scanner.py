@@ -271,13 +271,17 @@ class RankedScanner(Scanner):
         needs_entries=(not any(live.get(k) for k in ('paused','buy_block','risk_latched','day_block'))
                        and live['cash']>=1 and len(live['positions'])<slots)
         experiments_need=(self.experiments and self.experiments.state()['enabled']) or self.trial_call('state')['enabled']
-        if not needs_entries and not experiments_need:
+        rotation_due=(expanded and len(live['positions'])==slots and len(ready)>=30 and bool(selected)
+                      and not any(live.get(k) for k in ('paused','buy_block','risk_latched','day_block')))
+        self.status['replacement_check_due']=bool(rotation_due)
+
+        if not needs_entries and not experiments_need and not rotation_due:
             requested=[]
             notes.append('Candidate quotes deferred: no active entry capacity and experiments disabled.')
         elif not experiments_need:
             requested=selected=selected[:min(6,slots-len(live['positions'])+1)]
         if getattr(self.experiments,'error',None):
-            needs_entries=False;requested=[]
+            needs_entries=False;rotation_due=False;requested=[]
             self.status['optional_error']=self.experiments.error
             notes.append(self.experiments.error)
         self.status['selected']=selected
@@ -314,9 +318,10 @@ class RankedScanner(Scanner):
                     prices=fresh;at=self.now('UTC').isoformat();self.audit['at']=at
                     entry_symbols=[s for s in selected if s in prices]
                     active={s:v for s,v in prices.items() if s in live['positions'] or s in entry_symbols}
-                    if active and needs_entries:
+                    if active and (needs_entries or rotation_due):
                         actions=ledger.cycle(active,{s:[float(r['close']) for r in bars[s]] for s in active},fx,today,at,
-                            symbols=list(active),history_rows=bars,purchase_limit=limit) or []
+                            symbols=list(active),history_rows=bars,purchase_limit=limit,
+                            replacement_candidates=entry_symbols if rotation_due else None,replacement_coverage=len(ready)) or []
                         previous={d['symbol']:d for d in self.audit['decisions']}
                         previous.update({d['symbol']:d for d in actions});self.audit['decisions']=list(previous.values())
                     self.audit['prices'].update(prices);self.status['checked']=list(self.audit['prices'])
@@ -491,3 +496,4 @@ class Journal:
                 'SELECT body,outcomes FROM decisions ORDER BY at DESC,rowid DESC LIMIT ?',(limit,))]
         return dict(total=total,limit=limit,records=rows,
             note='Retention: latest 90 days, capped at 250,000 observations. Export regularly to keep older records. Outcomes are cost-free USD moves from the prior completed close to the 1st, 5th and 20th session closes AFTER the observation date. They are not trade returns. References are rebased using the same split-adjusted history. Blank means pending or insufficient subsequently received history. Intraday observations overlap and are not independent samples.')
+

@@ -66,3 +66,68 @@ def screening_universe(mapping):
     others=sorted((s for s in mapping if s not in seeds),
         key=lambda s:(hashlib.sha256(('trading-lab-300-v1:'+s).encode()).hexdigest(),s))
     return (seeds+others)[:UNIVERSE_TARGET]
+
+
+
+REPLACEMENT_VERSION = 'persistent-momentum-v1'
+
+def replacement_review(state, bars, prices, signals, day, candidates, coverage,
+                       max_positions, price_cost, fx_cost):
+    """Pure, conservative rotation proposal. Historical strength is NOT expected return.
+
+    Confirm the same pair on adjacent completed-session grids, after installation.
+    The caller validates fresh quotes and executes both legs atomically.
+    """
+    result = dict(version=REPLACEMENT_VERSION, day=day, eligible=False,
+                  reason='No qualifying replacement', coverage=coverage,
+                  note='Historical momentum comparison, not a forecast; partial universe coverage.')
+    def stop(reason):
+        result['reason'] = reason
+        return result
+    held=state['positions']
+    if any(state.get(k) for k in ('paused','buy_block','risk_latched','day_block')):
+        return stop('Trading control blocks replacement')
+    if len(held)!=max_positions:return stop('Vacant slots: use normal entries first')
+    if coverage<30:return stop('Need at least 30 comparable histories')
+    if any(signals.get(s)=='sell' or prices[s]<=p['entry_usd']*(1-STOP_FRACTION) for s,p in held.items()):
+        return stop('Normal exit takes priority')
+    try:
+        symbols=list(held)+[s for s in candidates if s not in held and s in prices]
+        grids={s:tuple(r['datetime'][:10] for r in bars[s]) for s in symbols}
+        grid=grids[symbols[0]]
+        if len(grid)!=50 or tuple(sorted(set(grid)))!=grid or grid[-1]>=day or any(g!=grid for g in grids.values()):
+            return stop('Replacement histories must share 50 completed session dates')
+        features={s:assess(bars[s]) for s in symbols}
+        if any(not math.isfinite(v) for f in features.values() for k,v in f.items() if isinstance(v,(float,int))):
+            return stop('Invalid replacement features')
+        result['asof']=grid[-1]
+        last=state.get('last_replacement_day')
+        if last and sum(d>last for d in grid)<3:return stop('Three-session portfolio replacement cooldown')
+        available=[s for s in symbols if s not in held and features[s]['eligible'] and signals.get(s)=='buy'
+                   and prices[s]>=1 and state.get('last_buy',{}).get(s)!=day
+                   and (not state.get('replacement_exits',{}).get(s) or
+                        sum(d>state['replacement_exits'][s] for d in grid)>=5)]
+        if not available:return stop('No fresh eligible candidate outside re-entry cooldown')
+        outgoing=min(held,key=lambda s:(features[s]['score'],s))
+        incoming=min(available,key=lambda s:(-features[s]['score'],s))
+        opened=held[outgoing]['opened'][:10]
+        if sum(d>opened for d in grid)<3:return stop('Weakest holding has fewer than three completed sessions since entry')
+        score_gap=features[incoming]['score']-features[outgoing]['score']
+        momentum_gap=features[incoming]['momentum_pct']-features[outgoing]['momentum_pct']
+        friction=100*(1-(1-price_cost)*(1-fx_cost)/((1+price_cost)*(1+fx_cost)))
+        required=max(3.0,2*friction)
+        result.update(outgoing=outgoing,incoming=incoming,score_gap=score_gap,
+                      momentum_gap_pct=momentum_gap,estimated_switch_cost_pct=friction,
+                      required_momentum_gap_pct=required)
+        if score_gap<2 or momentum_gap<required:
+            return stop('Advantage below score gap 2 or cost-buffered momentum threshold')
+        previous=state.get('replacement_review',{})
+        first=previous.get('first_asof') if (previous.get('version')==REPLACEMENT_VERSION and
+            previous.get('outgoing')==outgoing and previous.get('incoming')==incoming and
+            previous.get('qualified') and previous.get('asof') in (grid[-2],grid[-1])) else grid[-1]
+        result.update(qualified=True,first_asof=first)
+        if first==grid[-1]:return stop('Waiting for same pair to qualify on a second session')
+        result.update(eligible=True,reason='Persistent advantage clears historical strength and cost gates')
+        return result
+    except (KeyError,ValueError,TypeError,IndexError,OverflowError):
+        return stop('Incomplete or invalid replacement evidence')

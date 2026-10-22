@@ -1,12 +1,13 @@
-2026.10.20.4 — Stock Research Desk and portfolio stress tests
+# Trading Lab 2026.10.22.1 — tested paper portfolio replacement
 
-- Adds all seven research areas: company fundamentals, valuation, market/industry context, earnings and catalyst tracking, portfolio-fit analysis, sourced stock reports and more realistic portfolio evaluation.
-- SEC annual company facts include growth, margins, cash flow, cash/debt components and share changes. Preserves received dates, filing periods, accessions, hashes and revisions. Requires existing SEC contact/monitoring in News; at most two additional SEC requests per poll and one attempt per stock per day for held/selected names. Unsupported data remains unknown.
-- Stock Research Desk shows annual valuation ratios and eligible peer medians, aligned relative performance, portfolio concentration/correlation flags, supporting/opposing evidence and reassessment conditions. Uses cached prices with no additional market-data requests. Partial universe/industry coverage is explicit.
-- Adds user-verified upcoming events with revision history, deduplicated filing catalysts and guidance-excerpt comparisons. Future earnings dates are user supplied; no automatic calendar or analyst-consensus feed. Text changes are not inferred earnings surprises.
-- Adds on-demand portfolio stress mode with £10,000/£1,000 defaults, spread/slippage/FX assumptions, SPY comparison, overnight-gap reporting and optional user-supplied dividend accounting. Historical entitlements and existing request budgets apply; an uncached stress run adds one SPY history request. No dividend input means price-return-only results.
-- Preserves active paper trades, risk limits, existing learning candidates and updater compatibility. No unrestricted self-rewriting, automatic promotion or paid subscriptions.
+Full portfolios can now replace a weaker holding when a stronger checked candidate qualifies on two adjacent completed-session grids. The rule requires a score gap of 2 and historical momentum advantage of at least 3 percentage points and twice modelled switching costs. It is an unproven screening heuristic, not a forecast of returns.
 
-Install through Software Updates, then open Stock Research Desk. No comparison reset required. Full methodology and data limits: docs/stock-research-desk.md.
+- Minimum three completed sessions since entry; three-session portfolio replacement cooldown; five-session re-entry cooldown for a replaced-out stock.
+- Normal stop-loss and trend exits run first. Account controls, corporate-action checks, regular-hours and quote freshness limits remain enforced.
+- Both replacement legs commit atomically, with linked execution evidence. New size uses net sale proceeds, capped by existing purchase limits; idle cash is not used to enlarge a replacement.
+- Optional replacement checks retain the free-plan 30-minute cadence and existing request reserves. With experiments off, one candidate quote is requested. Require at least 30 comparable histories; partial coverage remains explicit.
+- Scanner displays the latest hold/replace reason and comparison. Read-only monitor includes replacement review after its process is restarted on this release.
 
-Validation: targeted financial-accounting, evidence provenance, access-control and integration tests, full regression suite, JavaScript syntax and desktop/mobile browser checks before publication.
+Deterministic tests cover execution, cash/cost reconciliation, transaction rollback, controls, confirmation and cooldowns, data failures, and scanner request bounds. Desktop/mobile browser checks cover the new display. These checks validate software behaviour, not profitability. No historical or forward investment-performance advantage is claimed.
+
+Install using Software Updates. Installation and running worker version must be verified locally; publication alone does not install the update.
