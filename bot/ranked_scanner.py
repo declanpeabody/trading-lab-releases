@@ -18,6 +18,9 @@ class RankedScanner(Scanner):
         from research import ShadowTrials
         try:self.trials=ShadowTrials(directory)
         except (sqlite3.Error,OSError,ValueError):self.trials=None
+        from portfolio_comparison import PortfolioComparison
+        try:self.portfolios=PortfolioComparison(directory)
+        except (sqlite3.Error,OSError,ValueError):self.portfolios=None
         self.clock=clock;self.budget=budget;self.experiments=experiments
         super().__init__(directory,market)
         self.journal=Journal(directory)
@@ -42,6 +45,17 @@ class RankedScanner(Scanner):
         except (sqlite3.Error,OSError,ValueError,KeyError,TypeError):
             self.status.setdefault('skipped',[]).append('Optional paper comparison unavailable; active account unaffected.')
             return {'enabled':False} if method=='state' else [] if method=='holdings' else None
+
+    def portfolio_call(self,method,*args,**kwargs):
+        try:
+            if self.portfolios is None:raise ValueError('Comparison unavailable')
+            return getattr(self.portfolios,method)(*args,**kwargs)
+        except Exception:
+            self.status['portfolio_error']='Portfolio comparison unavailable; active account unaffected.'
+            if method=='observe' and self.portfolios is not None:
+                try:self.portfolios.miss('Comparison calculation failed; both portfolios held')
+                except Exception:pass
+            return [] if method=='holdings' else None
 
     def now(self, zone):
         return self.clock.now(zone) if self.clock else datetime.now(ZoneInfo(zone))
@@ -77,6 +91,7 @@ class RankedScanner(Scanner):
         except Exception as exc:
             error=str(exc) if isinstance(exc,ValueError) else 'Cycle failed before completion'
             self.trial_call('miss','Account/data check incomplete; comparison held')
+            self.portfolio_call('miss','Account/data check incomplete; both portfolios held')
             if self.experiments:
                 try:self.experiments.miss(self.now('America/New_York').date().isoformat())
                 except Exception:pass
@@ -149,6 +164,7 @@ class RankedScanner(Scanner):
         ranked=rank_histories(ready);selected=candidates(ranked,held)
         experiment_held=self.experiments.holdings() if self.experiments else []
         trial_held=self.trial_call('holdings')
+        portfolio_held=self.portfolio_call('holdings') if free_profile else []
         combined=list(dict.fromkeys(experiment_held+trial_held))
         if len([s for s in combined if s not in held])>6 and trial_held:
             self.trial_call('invalidate',"Comparison stopped: combined shadow holdings exceed six optional quote slots. Restart after review.")
@@ -160,6 +176,8 @@ class RankedScanner(Scanner):
             experiment_held=[];extras=[]
         # Six normal quote slots remain a hard ceiling; observer holdings share
         # them with candidates. Existing account holdings retain priority credits.
+        # Comparison holdings share existing optional slots; never reserve active credits.
+        portfolio_extras=[s for s in portfolio_held if s not in held and s not in extras]
         requested=list(dict.fromkeys(extras+selected))[:6]
         selected=[s for s in selected if s in requested]
         if extras:notes.append('Experiment holdings share the six non-held quote slots; entry coverage may be reduced.')
@@ -169,7 +187,7 @@ class RankedScanner(Scanner):
         if len(ready)<len(universe):notes.append('Partial ranking: only ready stocks are eligible; the rest wait for valid history.')
         self.audit['bars']=dict(bars)
         self.audit['at']=self.now('UTC').isoformat()
-        raw={};received={};prices={};fxdata=None;fx=None
+        raw={};received={};prices={};fxdata=None;fx=None;portfolio_benchmark=None
         slots=getattr(ledger,'max_positions',5)
         expanded=getattr(ledger,'purchase_cap',200)==1000
         limit=1000 if expanded else self.experiments.active_limit() if self.experiments else 200
@@ -178,7 +196,10 @@ class RankedScanner(Scanner):
         def observe_signals(prices,at):
             try:
                 from research import ResearchSignals
-                ResearchSignals(self.directory).observe(prices,bars,at,self.audit.get('decisions',[]),now=self.now('UTC'))
+                store=ResearchSignals(self.directory)
+                follow=set(self.status.get('signal_followups',[]))
+                store.observe({s:p for s,p in prices.items() if s not in follow},bars,at,self.audit.get('decisions',[]),now=self.now('UTC'))
+                if follow:store.observe({s:p for s,p in prices.items() if s in follow},{},at,now=self.now('UTC'),resolve_only=True)
                 self.status.pop('signals_error',None)
             except Exception:
                 self.status['signals_error']='Research signals unavailable; active account check preserved.'
@@ -264,6 +285,7 @@ class RankedScanner(Scanner):
                 check=self.timestamp();value=quote(benchmark,'SPY',check,'USD')
                 if benchmark.get('exchange')!='NYSE Arca' or benchmark.get('is_extended_hours') is True:raise ValueError('Benchmark identity/session mismatch')
                 rate=validate('USD/GBP',check)
+                portfolio_benchmark=(value,rate,self.now('UTC').isoformat())
                 ledger.record_benchmark(value,rate,self.now('UTC').isoformat(),ledger.read()['last_success'],today)
             except (ValueError,KeyError,TypeError,OSError,sqlite3.Error):notes.append('Optional SPY benchmark unavailable today; account checks unaffected.')
 
@@ -287,10 +309,26 @@ class RankedScanner(Scanner):
         self.status['selected']=selected
         self.status['active_entry_needed']=bool(needs_entries)
         self.status['entry_skip_reason']=('User blocked buys' if live.get('buy_block') else 'Total drawdown buying lock' if live.get('risk_latched') else 'Daily drawdown buying block' if live.get('day_block') else 'Position limit reached' if len(live['positions'])>=slots else 'Insufficient cash' if live['cash']<1 else None)
+        # At most one additional comparison holding shares an unused slot.
+        # Divergence beyond available data freezes both books, never expands quota.
+        if free_monitoring and len(requested)<6:
+            requested += [s for s in portfolio_extras if s not in requested][:1]
+        # One due outcome can use an unused optional slot, at most once per stage.
+        # No history request is needed and it cannot become an active entry.
+        followups=[]
+        if free_monitoring and len(requested)<6:
+            try:
+                from research import ResearchSignals
+                followups=[s for s in ResearchSignals(self.directory).followups(self.now('UTC'),10000)
+                           if s in mapping and s not in held and s not in requested][:1]
+                requested=requested+followups
+            except Exception:self.status['signals_error']='Follow-up queue unavailable'
+        self.status['signal_followups']=followups
         self.status['quote_requested']=requested
+        portfolio_observed=False
         try:
             for symbol in requested:
-                if symbol in experiment_held and symbol not in bars:
+                if symbol in experiment_held+portfolio_held and symbol not in bars:
                     bars[symbol]=self._history(symbol,mapping,today)
                 try:fetch(symbol)
                 except MarketUnavailable:raise
@@ -326,12 +364,20 @@ class RankedScanner(Scanner):
                         previous.update({d['symbol']:d for d in actions});self.audit['decisions']=list(previous.values())
                     self.audit['prices'].update(prices);self.status['checked']=list(self.audit['prices'])
                     observe_signals(prices,at)
+                    if free_monitoring:
+                        portfolio_observed=True
+                        if portfolio_benchmark and (self.now('UTC')-datetime.fromisoformat(portfolio_benchmark[2])).total_seconds()>120:
+                            portfolio_benchmark=None
+                        self.portfolio_call('observe',prices,bars,fx,today,at,entry_symbols,len(ready),
+                            buy_block=live['buy_block'],benchmark=portfolio_benchmark)
                     if self.experiments and not ledger.read().get('error') and not ledger.read()['paused']:
                         self.experiments.observe(prices,bars,fx,today,at,entry_symbols,buy_block=live['buy_block'])
                         if not expanded:self.experiments.promote(ledger,today)
                     self.trial_call('observe',prices,bars,fx,today,at,entry_symbols,buy_block=live['buy_block'])
                 else:
                     self.trial_call('miss','Quotes expired during optional checks; all trial books held')
+                    portfolio_observed=True
+                    self.portfolio_call('miss','Quotes expired; both portfolios held')
                     if self.experiments:self.experiments.miss(today)
             elif self.experiments and prices:
                 self.experiments.observe(prices,bars,fx,today,self.audit['at'],[],buy_block=live['buy_block'])
@@ -341,7 +387,10 @@ class RankedScanner(Scanner):
             self.status['optional_error']=str(exc)
             if self.experiments:self.experiments.miss(today)
             self.trial_call('miss','Optional data unavailable; comparison held')
+            self.portfolio_call('miss','Optional data unavailable; both portfolios held')
             return
+        if free_monitoring and not portfolio_observed:
+            self.portfolio_call('miss','No complete optional snapshot; both portfolios held')
         self.status['quote_wait_seconds']={s:round(max(0,self.timestamp()-t),2) for s,t in received.items()}
         if not self.status['checked']:
             if self.experiments:self.experiments.miss(today)

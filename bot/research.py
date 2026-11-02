@@ -686,6 +686,7 @@ class ResearchSignals:
         import sqlite3
         db=sqlite3.connect(self.path,timeout=1)
         db.execute('CREATE TABLE IF NOT EXISTS signals(id TEXT PRIMARY KEY,body TEXT NOT NULL)')
+        db.execute('CREATE TABLE IF NOT EXISTS signal_archive(id TEXT PRIMARY KEY,body TEXT NOT NULL)')
         return db
 
     @staticmethod
@@ -706,7 +707,7 @@ class ResearchSignals:
             except (sqlite3.Error,ValueError):errors.append(kind+' source storage unavailable')
         return rows,errors
 
-    def observe(self,prices,bars,stamp,decisions=(),now=None):
+    def observe(self,prices,bars,stamp,decisions=(),now=None,resolve_only=False):
         import math
         from zoneinfo import ZoneInfo
         now=now or datetime.now(timezone.utc);at=self.time(stamp)
@@ -742,9 +743,12 @@ class ResearchSignals:
                     'active_action':actions.get(e['symbol'],'Not evaluated'),'baseline':None,'outcomes':{}})
             except (KeyError,TypeError,ValueError):continue
         with self.lock,closing(self.connect()) as db,db:
+            self.archive(db,at)
             count=db.execute('SELECT COUNT(*) FROM signals').fetchone()[0]
+            if resolve_only:prepared=[]
             for row in prepared:
                 if count>=10000:break
+                if db.execute('SELECT 1 FROM signal_archive WHERE id=?',(row['id'],)).fetchone():continue
                 count+=db.execute('INSERT OR IGNORE INTO signals VALUES (?,?)',(row['id'],json.dumps(row,allow_nan=False))).rowcount
             for ident,body in db.execute('SELECT id,body FROM signals').fetchall():
                 row=json.loads(body);price=prices.get(row['symbol']);seen=self.time(row['first_seen'])
@@ -761,10 +765,36 @@ class ResearchSignals:
                                 'hypothetical_long_after_cost_pct':100*(ratio*(1-.0025)*(1-.0015)/((1+.0025)*(1+.0015))-1)}
                 db.execute('UPDATE signals SET body=? WHERE id=?',(json.dumps(row,allow_nan=False),ident))
 
+    def archive(self,db,now):
+        # Move only terminal evidence. Keep unresolved windows intact across upgrades.
+        for ident,body in db.execute('SELECT id,body FROM signals').fetchall():
+            row=json.loads(body);base=row.get('baseline')
+            age=(now-self.time(base['at'] if base else row['first_seen'])).total_seconds()/3600
+            if (base and (all(str(h) in row['outcomes'] for h in (24,120)) or age>192)) or (not base and age>24):
+                db.execute('INSERT OR IGNORE INTO signal_archive VALUES(?,?)',(ident,body))
+                db.execute('DELETE FROM signals WHERE id=?',(ident,))
+
+    def followups(self,now=None,limit=1):
+        """Earliest expiring measurable window first; never request historical quotes."""
+        now=now or datetime.now(timezone.utc);due={}
+        with self.lock,closing(self.connect()) as db:
+            for body, in db.execute('SELECT body FROM signals'):
+                r=json.loads(body);base=r.get('baseline')
+                anchor=self.time(base['at'] if base else r['first_seen'])
+                age=(now-anchor).total_seconds()/3600
+                windows=[(h,h+72) for h in (24,120) if str(h) not in r['outcomes']] if base else [(0,24)]
+                for start,end in windows:
+                    if start<=age<=end:
+                        deadline=anchor+timedelta(hours=end)
+                        due[r['symbol']]=min(due.get(r['symbol'],deadline),deadline)
+        return sorted(due,key=lambda symbol:(due[symbol],symbol))[:limit]
+
     def state(self,export=False,now=None):
         now=now or datetime.now(timezone.utc)
         with self.lock,closing(self.connect()) as db:
-            rows=[json.loads(r[0]) for r in db.execute('SELECT body FROM signals ORDER BY rowid DESC')]
+            active=db.execute('SELECT COUNT(*) FROM signals').fetchone()[0]
+            rows=[json.loads(r[0]) for r in db.execute('SELECT body FROM signals UNION ALL SELECT body FROM signal_archive')]
+            rows.sort(key=lambda r:r['first_seen'],reverse=True)
         groups={}
         for r in rows:
             base=r['baseline'];age=(now-self.time(base['at'] if base else r['first_seen'])).total_seconds()/3600
@@ -776,7 +806,7 @@ class ResearchSignals:
                 if r['direction']=='BUY':
                     g['buy_measured_24h']+=1;g['buy_positive_after_cost']+=int(r['outcomes']['24']['hypothetical_long_after_cost_pct']>0)
         return {'records':rows if export else rows[:100],'total':len(rows),'summary':groups,'source_errors':self.sources()[1],
-            'full':len(rows)>=10000,'note':'Observation only. First snapshot per stock/model/New York day, including BUY, SELL and HOLD; candidate coverage is selected by the active scanner. News is context, not a buy/sell prediction. Only newly discovered items (within 24h) enter; no retroactive baselines. Identical stored feed IDs are deduplicated, but differently worded reports may share an underlying story: counts are not independent votes. Baselines require fresh shared quotes; news requires a subsequent quote within 24h. Outcomes use the first available quote 24/120 elapsed hours after baseline, allowing up to 72h delay; missing windows remain unmeasured. USD moves are unadjusted for splits/dividends/FX. Hypothetical long results apply 0.25% price and 0.15% FX allowances on each side with constant FX; they are not actual trades, SELL profits or portfolio returns. Overlapping observations are not independent. No automatic promotion. Store stops at 10,000 records; export retains all evidence.'}
+            'active':active,'archived':len(rows)-active,'full':active>=10000,'note':'Observation only. First snapshot per stock/model/New York day, including BUY, SELL and HOLD; candidate coverage is selected by the active scanner. News is context, not a buy/sell prediction. Only newly discovered items (within 24h) enter; no retroactive baselines. Identical stored feed IDs are deduplicated, but differently worded reports may share an underlying story: counts are not independent votes. Baselines require fresh shared quotes; news requires a subsequent quote within 24h. Outcomes use the first available quote 24/120 elapsed hours after baseline, allowing up to 72h delay; missing windows remain unmeasured. USD moves are unadjusted for splits/dividends/FX. Hypothetical long results apply 0.25% price and 0.15% FX allowances on each side with constant FX; they are not actual trades, SELL profits or portfolio returns. Overlapping observations are not independent. No automatic promotion. Active pending evidence is capped at 10,000. Completed and expired records are archived locally without deletion and included in exports and learning. A full pending queue still pauses new records. Archival does not recover previously missed observations.'}
 
 
 class SessionScorecard:
@@ -997,23 +1027,26 @@ class DailyLearning:
         db = sqlite3.connect(self.path, timeout=1)
         db.execute('CREATE TABLE IF NOT EXISTS reviews(day TEXT PRIMARY KEY, body TEXT NOT NULL)')
         db.execute('CREATE TABLE IF NOT EXISTS model(id INTEGER PRIMARY KEY, body TEXT NOT NULL)')
+        db.execute('CREATE TABLE IF NOT EXISTS health(id INTEGER PRIMARY KEY, body TEXT NOT NULL)')
         return db
 
     def state(self):
         with closing(self.connect()) as db:
             r = db.execute('SELECT body FROM reviews ORDER BY day DESC LIMIT 1').fetchone()
             m = db.execute('SELECT body FROM model WHERE id=1').fetchone()
+            h = db.execute('SELECT body FROM health WHERE id=1').fetchone()
         return dict(last_review=json.loads(r[0]) if r else None,
                     model=json.loads(m[0]) if m else {'phase': 'development'},
-                    error=self.error, schedule='Once per weekday after 18:00 New York; requires running app. No backfilled daily reviews.',
+                    error=self.error or (json.loads(h[0]).get('error') if h else None), health=json.loads(h[0]) if h else None,
+                    schedule='After 16:15 New York. On restart, recover up to five missed evidence dates per minute (last 366 days); recovered reviews cannot advance models.',
                     note=NOTE, automatic_deployment=False)
 
-    def review(self, ledger, now=None):
+    def review(self, ledger, now=None, recovered_day=None, completed_at=None):
         now = now or datetime.now(timezone.utc)
         local = now.astimezone(NY)
-        if local.weekday() >= 5 or local.hour < 18:
+        if not recovered_day and (local.weekday() >= 5 or (local.hour,local.minute)<(16,15)):
             return False
-        day = local.date().isoformat()
+        day = recovered_day or local.date().isoformat()
         with closing(self.connect()) as db:
             if db.execute('SELECT 1 FROM reviews WHERE day=?', (day,)).fetchone():
                 return False
@@ -1032,7 +1065,7 @@ class DailyLearning:
             old = db.execute('SELECT body FROM model WHERE id=1').fetchone()
             model = json.loads(old[0]) if old else {'phase': 'development'}
             decision = 'No change: insufficient qualifying evidence or screening gates not met.'
-            if model['phase'] == 'development' and passes(development) and not evidence['source_errors']:
+            if not recovered_day and model['phase'] == 'development' and passes(development) and not evidence['source_errors']:
                 code = strategy_code('faster_10_30')
                 compile(code, '<generated-research-candidate>', 'exec')  # Syntax check only.
                 digest = hashlib.sha256(code.encode()).hexdigest()
@@ -1045,7 +1078,7 @@ class DailyLearning:
                              code_sha256=digest, candidate_file=target.name, development=development,
                              approval_required=True)
                 decision = 'Candidate code generated and frozen; waiting for new forward-test observations.'
-            if model['phase'] == 'forward_test':
+            if not recovered_day and model['phase'] == 'forward_test':
                 candidate = self.directory / 'learning-candidates' / model['candidate_file']
                 if hashlib.sha256(candidate.read_bytes()).hexdigest() != model['code_sha256']:
                     raise ValueError('Candidate code changed; forward test cannot continue')
@@ -1059,25 +1092,68 @@ class DailyLearning:
                                 if model['phase'] == 'review_proposal' else 'No change: candidate failed forward-test gates.')
             elif model['phase'] in ('review_proposal', 'rejected'):
                 decision = 'No change: completed evaluation retained; no automatic retesting or deployment.'
-            report = dict(day=day, completed_at=now.isoformat(), observations=len(rows),
+            if recovered_day:decision='Recovered as-of review only; no retrospective model selection or promotion.'
+            report = dict(day=day, completed_at=(completed_at or now).isoformat(), evidence_cutoff=now.isoformat(), recovered=bool(recovered_day), observations=len(rows),
                           usable_observations=sum(g['measured'] for g in cards), source_scorecards=cards,
                           source_errors=evidence['source_errors'], store_full=evidence['full'],
+                          execution_records_truncated=accounting['recorded_executions']>len(accounting['executions']),
+                          session_coverage='Recorded observations only; a daily review does not prove full-session monitoring.',
                           closed_trades=len(closed), realised_pnl_gbp=sum(e['realised_pnl_gbp'] for e in closed),
                           execution_costs_gbp=sum(e['price_cost_gbp'] + e['fx_cost_gbp'] for e in today),
                           closed_trade_reviews=closed, development=development, decision=decision,
                           limitations='Closed-trade totals cover this review date and detailed recorded fills only. Missed BUY observations are hypothetical, not executable missed profits. No benchmark-adjusted news attribution yet.')
-            db.execute('INSERT OR REPLACE INTO model VALUES(1,?)', (json.dumps(model, allow_nan=False),))
+            if not recovered_day:db.execute('INSERT OR REPLACE INTO model VALUES(1,?)', (json.dumps(model, allow_nan=False),))
             db.execute('INSERT INTO reviews VALUES(?,?)', (day, json.dumps(report, allow_nan=False)))
             db.execute('DELETE FROM reviews WHERE day NOT IN (SELECT day FROM reviews ORDER BY day DESC LIMIT 366)')
         return True
 
+    def recover(self,ledger,now=None):
+        now=now or datetime.now(timezone.utc)
+        earliest=(now.astimezone(NY).date()-timedelta(days=366)).isoformat()
+        days=set()
+        # Read existing sources only; no synthetic sessions and no market requests.
+        for name,query in (
+            ('research-signals.sqlite3','SELECT body FROM signals'),
+            ('research-signals.sqlite3','SELECT body FROM signal_archive'),
+            ('decisions.sqlite3','SELECT DISTINCT day FROM decisions'),
+            ('paper.sqlite3','SELECT body FROM executions')):
+            path=self.directory/name
+            if not path.exists():continue
+            with closing(sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True)) as db:
+                if 'signal_archive' in query and not db.execute("SELECT 1 FROM sqlite_master WHERE name='signal_archive'").fetchone():continue
+                for value, in db.execute(query):
+                    if 'DISTINCT day' in query:day=value
+                    else:
+                        row=json.loads(value);day=timestamp(row.get('first_seen') or row['at']).astimezone(NY).date().isoformat()
+                    if earliest<=day<now.astimezone(NY).date().isoformat():days.add(day)
+        with closing(self.connect()) as db:done={r[0] for r in db.execute('SELECT day FROM reviews')}
+        count=0
+        for day in [d for d in sorted(days-done) if datetime.fromisoformat(d).weekday()<5][:5]:
+            cutoff=datetime.fromisoformat(day).replace(hour=16,minute=15,tzinfo=NY).astimezone(timezone.utc)
+            if cutoff.weekday()>=5:continue
+            count+=bool(self.review(ledger,cutoff,recovered_day=day,completed_at=now))
+        return count
+
     def worker(self, ledger, stop):
         while not stop.is_set():
+            attempted=datetime.now(timezone.utc).isoformat()
             try:
+                # Current review always gets priority over a historical backlog.
                 self.review(ledger)
+                recovered=self.recover(ledger)
                 self.error = None
             except Exception:
+                recovered=None
                 self.error = 'Daily review failed; existing evidence preserved. Check storage and source records.'
+            try:
+                with closing(self.connect()) as db,db:
+                    old=db.execute('SELECT body FROM health WHERE id=1').fetchone()
+                    health=json.loads(old[0]) if old else {}
+                    health.update(last_attempt=attempted,error=self.error,recovered_this_check=recovered)
+                    if not self.error:health['last_success']=datetime.now(timezone.utc).isoformat()
+                    db.execute('INSERT OR REPLACE INTO health VALUES(1,?)',(json.dumps(health),))
+            except Exception:
+                self.error='Daily review health storage unavailable; existing evidence preserved.'
             stop.wait(60)
 
 # Stock Research Desk: descriptive evidence only, never an execution dependency.

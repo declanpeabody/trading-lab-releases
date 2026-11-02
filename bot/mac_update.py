@@ -42,7 +42,7 @@ def cleanup_updates(base, protected=()):
     for p in candidates[3:]:shutil.rmtree(p)
 
 FILES=('app.py','engine.py','market.py','dashboard.html','mac_runner.py','mac_setup.py',
-       'backtest.py','research.py','research.html','mac_update.py','scanner.py','news.py','news.html',
+       'backtest.py','portfolio_comparison.py','research.py','research.html','mac_update.py','scanner.py','news.py','news.html',
        'strategy.py','ranked_scanner.py','ranked_backtest.py','version.py','updater.py','update_worker.py','updates.html')
 
 def apply_update(base,source):
