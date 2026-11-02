@@ -1,7 +1,7 @@
 # Private paper-bot monitoring — 2026.10.14.4
 
-This batch adds three read-only MCP tools: `get_bot_status`,
-`get_recent_decisions`, and `get_recent_trades`. The latter two accept an optional
+The monitor exposes four read-only MCP tools: `get_bot_status`,
+`get_recent_decisions`, `get_recent_trades`, and `get_learning_status`. The decision and trade tools accept an optional
 New York trading date and limit (1–100). No tool can trade, change settings,
 request new quotes, select files, execute commands, or connect to arbitrary URLs.
 
@@ -75,3 +75,12 @@ The key is stored at `private-monitor/runtime-key` under the installed applicati
 Check `http://127.0.0.1:8080/ui` for Ready status, enable local read-only sharing, and verify a real status read. Registration alone does not verify network authentication. Keep the iMac awake; this is login startup, not operation during sleep. **Option 10** stops this launch agent, removes its plist and saved runtime key, and leaves the trading service unchanged. Disable sharing in the dashboard to revoke monitor reads immediately, including any separately running manual tunnel. After a bot update, the stdio process may need a tunnel restart to load the updated monitor code.
 
 Automated tests check configuration and secret handling. Actual macOS launch-agent startup, reboot, sleep/wake and revocation still require verification on the iMac.
+
+
+## Separating tunnel failures from bot failures
+
+An HTTP 429 from the MCP tunnel/gateway prevents a snapshot read. It is not a Twelve Data quota observation, proof that the worker stopped, or evidence that the saved prices are current. Retry later rather than repeatedly probing. From the Mac, inspect the existing tunnel UI at `http://127.0.0.1:8080/ui` for Ready status and the bot dashboard for the last successful holding check. If the local UI is Ready but remote reads still fail, retain the gateway error and its timestamp for connection support; do not reset the account or regenerate keys as a first response.
+
+After installing an update, restart the existing tunnel process so its stdio monitor loads the new code. Confirm a successful `get_bot_status` read, then compare `components.monitor_version` with the saved `components.worker_version`; a release number alone is not installation evidence. The status response embeds `daily_learning` so existing clients can see diagnostics even before rediscovering the new `get_learning_status` tool. Both paths use SQLite read-only connections, never initialise missing databases, and expose saved observations only. The latest ten review summaries and at most 20 closed-trade details are returned with explicit coverage/truncation notes. Persistent review-worker health and trading-worker progress are distinct.
+
+This release improves local visibility but cannot repair a remote gateway HTTP 429 or restart a Mac from the read-only connector.

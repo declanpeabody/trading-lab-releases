@@ -223,7 +223,9 @@ def handler_factory(ledger, username, password, thread, research=None, news=None
             elif self.path == '/api/learning':
                 try:
                     learning = LEARNING or DailyLearning(os.getenv('DATA_DIR','/data'))
-                    self.respond(200,json.dumps(learning.state(),allow_nan=False))
+                    state=learning.state()
+                    state['diagnostics']=monitoring_learning(os.getenv('DATA_DIR','/data'))
+                    self.respond(200,json.dumps(state,allow_nan=False))
                 except (OSError,ValueError,sqlite3.Error):
                     self.respond(503,json.dumps({'error':'Daily learning storage unavailable; existing evidence preserved.'}))
             elif self.path == '/api/calendar':
@@ -323,6 +325,8 @@ MONITOR_CONTROL_LOCK = threading.Lock()
 MONITOR_TOOLS = [
     {'name':'get_bot_status','description':'Read the paper bot account, positions, last recorded errors, scanner coverage and data age. This does not refresh prices or prove the worker is alive.',
      'inputSchema':{'type':'object','properties':{},'additionalProperties':False}},
+    {'name':'get_learning_status','description':'Read saved daily-review health, recent reviews, model progress, evidence retention and portfolio comparison coverage. Does not run learning or refresh data.',
+     'inputSchema':{'type':'object','properties':{},'additionalProperties':False}},
     {'name':'get_recent_decisions','description':'Read up to 100 recorded stock decisions, newest first. Optional day is a New York trading date (YYYY-MM-DD); rows are observations, not independent trades.',
      'inputSchema':{'type':'object','properties':{'day':{'type':'string','pattern':'^\\d{4}-\\d{2}-\\d{2}$'},'limit':{'type':'integer','minimum':1,'maximum':100}},'additionalProperties':False}},
     {'name':'get_recent_trades','description':'Read recorded paper BUY/SELL decisions, newest first. Optional day is a New York trading date. These are simulated executions, not broker orders.',
@@ -371,6 +375,44 @@ def monitor_redact(value,directory):
     return clean(value)
 
 
+def monitoring_learning(directory):
+    from contextlib import closing
+    result=dict(generated_at=datetime.now(ZoneInfo('UTC')).isoformat(),read_only=True,
+        monitor_version=VERSION,worker_version=saved_worker(directory).get('version'),
+        last_review=None,model=None,health=None,recent_reviews=[],evidence=None,portfolio_comparison=None,errors=[])
+    try:
+        with closing(monitor_db(directory,'daily-learning.sqlite3')) as db:
+            reviews=[json.loads(r[0]) for r in db.execute('SELECT body FROM reviews ORDER BY day DESC LIMIT 10')]
+            result['last_review']=reviews[0] if reviews else None
+            if result['last_review']:
+                review=result['last_review'];closed=review.get('closed_trade_reviews',[])
+                review['closed_trade_reviews']=closed[:20]
+                review['closed_trade_reviews_more_available']=len(closed)>20
+            result['recent_reviews']=[{k:r.get(k) for k in ('day','completed_at','evidence_cutoff','recovered','observations','usable_observations','closed_trades','realised_pnl_gbp','decision')} for r in reviews]
+            model=db.execute('SELECT body FROM model WHERE id=1').fetchone()
+            result['model']=json.loads(model[0]) if model else None
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='health'").fetchone():
+                row=db.execute('SELECT body FROM health WHERE id=1').fetchone()
+                result['health']=json.loads(row[0]) if row else None
+    except (OSError,sqlite3.Error,ValueError,KeyError,TypeError,AttributeError,ZeroDivisionError):result['errors'].append('Daily learning snapshot unavailable')
+    try:
+        with closing(monitor_db(directory,'research-signals.sqlite3')) as db:
+            active=db.execute('SELECT COUNT(*) FROM signals').fetchone()[0]
+            archived=db.execute('SELECT COUNT(*) FROM signal_archive').fetchone()[0] if db.execute("SELECT 1 FROM sqlite_master WHERE name='signal_archive'").fetchone() else 0
+            result['evidence']=dict(active=active,archived=archived,total=active+archived,pending_capacity=10000,full=active>=10000)
+    except (OSError,sqlite3.Error,ValueError,KeyError,TypeError,AttributeError,ZeroDivisionError):result['errors'].append('Signal evidence snapshot unavailable')
+    try:
+        from portfolio_comparison import PortfolioComparison
+        with closing(monitor_db(directory,'portfolio-comparison.sqlite3')) as db:
+            row=db.execute('SELECT body FROM comparison WHERE id=1').fetchone()
+        if row:
+            described=PortfolioComparison.describe(json.loads(row[0]))
+            result['portfolio_comparison']={k:described.get(k) for k in ('started','last','checks','misses','days','coverage','coverage_note','metrics','benchmark','message','automatic_deployment','note')}
+    except (OSError,sqlite3.Error,ValueError,KeyError,TypeError,AttributeError,ZeroDivisionError):result['errors'].append('Portfolio comparison snapshot unavailable')
+    result['note']='Saved evidence only; no fresh worker probe. Missing stores and reviews mean unavailable, not zero activity. Recent reviews limited to ten; dates are New York sessions, timestamps include UTC offsets. Review heartbeat is separate from trading-worker progress. Gateway/tunnel failures occur before these snapshots can be read.'
+    return monitor_redact(result,directory)
+
+
 def monitoring_status(directory):
     from contextlib import closing
     with closing(monitor_db(directory,'paper.sqlite3')) as db:
@@ -400,13 +442,14 @@ def monitoring_status(directory):
     result['components']={'monitor_version':VERSION,'monitor_started_at':PROCESS_STARTED_AT,
         'worker_version':result['worker_progress'].get('version'),'worker_started_at':result['worker_progress'].get('started_at'),
         'restart_monitor_required':bool(result['worker_progress'].get('version') and result['worker_progress']['version']!=VERSION)}
+    result['daily_learning']=monitoring_learning(directory)
     result['replacement_review']=state.get('replacement_review')
     result['last_replacement_day']=state.get('last_replacement_day')
     result['performance']=state.get('performance')
     result['benchmark']=state.get('benchmark')
     result['positions']=positions
     scan=state.get('scanner',{})
-    result['scanner']={key:scan.get(key) for key in ('updated_at','decision_at','target_count','universe_count','histories_ready','ranked_histories','histories_pending','selected','checked','decision_state','quote_failures','history_failures','holdings_checked_at','optional_error','quote_wait_seconds','focus_target','focus_ready','history_policy','replacement_priority')}
+    result['scanner']={key:scan.get(key) for key in ('updated_at','decision_at','target_count','universe_count','histories_ready','ranked_histories','histories_pending','selected','checked','decision_state','quote_failures','history_failures','holdings_checked_at','optional_error','quote_wait_seconds','focus_target','focus_ready','history_policy','replacement_priority','signals_error','signal_followups','portfolio_error')}
     try:
         with closing(monitor_db(directory,'api_budget.sqlite3')) as db:
             used=db.execute('SELECT n FROM usage WHERE day=?',(now.date().isoformat(),)).fetchone()
@@ -492,9 +535,9 @@ def monitoring_rpc(message,directory):
             result={'isError':True,'content':[{'type':'text','text':'Monitoring is disabled. Enable it locally in the dashboard to share read-only snapshots.'}]}
         else:
             try:
-                if name=='get_bot_status':
+                if name in ('get_bot_status','get_learning_status'):
                     if arguments:raise ValueError('This tool takes no arguments')
-                    output=monitoring_status(directory)
+                    output=(monitoring_status if name=='get_bot_status' else monitoring_learning)(directory)
                 else:output=monitoring_decisions(directory,arguments,name=='get_recent_trades')
                 result={'content':[{'type':'text','text':json.dumps(output,allow_nan=False)}]}
             except Exception:

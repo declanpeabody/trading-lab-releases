@@ -1,3 +1,24 @@
+## 2026.11.02.1 learning reliability and portfolio comparison
+
+Twenty new synthetic tests cover terminal-evidence archival without pending-record
+loss, the 10,000 pending cap, archive deduplication, deadline-ordered follow-up,
+no new model signals from follow-up quotes, reserved-credit refusal and holding
+priority, New York daylight-saving review times, restart recovery without future
+outcomes or retrospective model selection, persistent errors, and read-only
+monitoring without creating missing stores.
+
+Paired-portfolio tests exercise identical capital/costs, five-slot replacement
+versus no replacement, user buy blocking, missing/divergent holding freezes,
+restart idempotence, SQLite rollback of both books and snapshots, prior-exposure
+cash-aware benchmark weights and stale benchmark rejection. Existing tests cover
+active replacement gates, quote freshness, holding reserves, updater rollback
+and unchanged account controls. Browser checks cover both comparison rows,
+coverage labels and desktop/mobile overflow with synthetic fixtures.
+
+No physical Mac or fresh account evidence was accessible: the connected monitor
+returned a gateway HTTP 429. Publication and synthetic tests do not prove local
+installation, restored connectivity or profitability.
+
 ## 2026.10.13.4 forward experiment coverage
 
 Tests cover separate persistent books and untouched active capital; immutable

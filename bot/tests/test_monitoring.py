@@ -74,7 +74,7 @@ class MonitoringTests(unittest.TestCase):
         initialize=monitoring_rpc({'jsonrpc':'2.0','id':1,'method':'initialize','params':{'protocolVersion':'2025-03-26'}},self.data)
         self.assertEqual(initialize['result']['protocolVersion'],'2025-03-26')
         listed=monitoring_rpc({'jsonrpc':'2.0','id':2,'method':'tools/list'},self.data)['result']['tools']
-        self.assertEqual(len(listed),3);self.assertTrue(all(t['annotations']['readOnlyHint'] for t in listed))
+        self.assertEqual(len(listed),4);self.assertTrue(all(t['annotations']['readOnlyHint'] for t in listed))
         request={'jsonrpc':'2.0','method':'tools/call','params':{'name':'get_bot_status'}}
         self.assertIsNone(monitoring_rpc(request,self.data))
         source=io.StringIO('bad\n'+'x'*65537+'\n'+json.dumps({'jsonrpc':'2.0','id':3,'method':'ping'})+'\n')
@@ -87,5 +87,5 @@ class MonitoringTests(unittest.TestCase):
         env=os.environ|{'DATA_DIR':str(self.root/'absent')}
         proc=subprocess.run([sys.executable,str(Path(__file__).resolve().parents[1]/'app.py'),'--monitor-stdio'],
             input=json.dumps({'jsonrpc':'2.0','id':1,'method':'tools/list'})+'\n',capture_output=True,text=True,env=env,timeout=10,check=True)
-        self.assertEqual(len(json.loads(proc.stdout)['result']['tools']),3)
+        self.assertEqual(len(json.loads(proc.stdout)['result']['tools']),4)
         self.assertEqual(proc.stderr,'');self.assertFalse((self.root/'absent').exists())
