@@ -123,6 +123,16 @@ class RankedScanner(Scanner):
             previous=self.daily.get('bars',{}) if self.daily.get('version')==LIVE_VERSION else {}
             self.daily={'day':today,'version':LIVE_VERSION,'bars':{},'attempted':[],'errors':{},'previous_bars':previous}
         bars=self.daily['bars'];attempted=set(self.daily['attempted'])
+        # Session counters track optional history batches, not mandatory holding quotes.
+        self.daily.setdefault('optional_batch_count',0)
+        self.daily.setdefault('optional_history_attempts',0)
+        self.daily.setdefault('optional_history_successes',0)
+        self.daily.setdefault('optional_batch_stop_counts',{})
+        self.status.update(optional_session_batches=self.daily['optional_batch_count'],
+            optional_session_attempts=self.daily['optional_history_attempts'],
+            optional_session_successes=self.daily['optional_history_successes'],
+            optional_batch_stop_counts=dict(self.daily['optional_batch_stop_counts']))
+        self.status.update(self.state.get('optional_batch_report',{}))
         focus=self.focus_symbols(universe) if free_profile else []
         self.status.update(focus_symbols=focus,focus_target=len(focus),focus_ready=sum(s in bars for s in focus),
             history_policy='50-name daily priority plus wider rotation' if free_profile else 'Legacy rotating batches')
@@ -247,10 +257,16 @@ class RankedScanner(Scanner):
         self.status['replacement_priority']=bool(free_monitoring and sold_this_cycle)
         if free_monitoring:
             last=self.state.get('optional_checked_at',0)
-            if held and not sold_this_cycle and 0<=self.timestamp()-last<1800:
+            # Fill the 50-name priority sample slightly sooner, but only while
+            # local request usage is low; normal API reserves stay enforced by Market.
+            usage=(self.budget or ApiBudget(self.directory)).used()
+            focus_missing=sum(s not in bars and s not in attempted for s in focus)
+            interval=1200 if focus_missing and usage<250 else 1800
+            self.status['optional_interval_minutes']=interval//60
+            if held and not sold_this_cycle and 0<=self.timestamp()-last<interval:
                 self.status['selected']=[]
                 self.status['quote_requested']=[]
-                notes.append('Free-plan monitoring: holdings checked; candidates, comparisons and history preparation run at most every 30 minutes.')
+                notes.append(f'Free-plan monitoring: mandatory holdings checked; optional histories scheduled at most every {interval//60} minutes while the Mac and market are active.')
                 return
             self.state['optional_checked_at']=self.timestamp();self.save()
             if sold_this_cycle:notes.append('A sale freed capacity: candidate checks prioritised this cycle within normal credits and quote freshness limits.')
@@ -375,12 +391,14 @@ class RankedScanner(Scanner):
                     if len(queue)>=5:break
             # A small catalogue may have no wider names; use remaining focus slots.
             queue.extend((s,cursor) for s in focus if s not in attempted and s not in bars and s not in {x[0] for x in queue})
-        budget=self.budget or ApiBudget(self.directory);shared_failure=None
+        budget=self.budget or ApiBudget(self.directory);shared_failure=None;downloaded=0;batch_stop_reason=None
         while universe and visited<len(universe) and len(batch)<(5 if free_monitoring else HISTORY_BATCH):
-            if ledger.read()['paused'] or not session_window(self.now('America/New_York')):break
-            if self.monotonic()>=deadline:break
+            if ledger.read()['paused'] or not session_window(self.now('America/New_York')):
+                batch_stop_reason='Paused or outside market hours';break
+            if self.monotonic()>=deadline:
+                batch_stop_reason='Optional batch exceeded 180-second time limit';break
             if budget.used()>=500:
-                notes.append('Normal API budget exhausted; history batches paused, priority holdings checks retained.');break
+                notes.append('Normal API budget exhausted; history batches paused, priority holdings checks retained.');batch_stop_reason='Local API budget exhausted';break
             previous_cursor=cursor
             if free_monitoring:
                 if not queue:break
@@ -392,7 +410,7 @@ class RankedScanner(Scanner):
             batch.append(symbol);attempted.add(symbol)
             try:
                 rows=self._history(symbol,mapping,today)
-                assess(rows);bars[symbol]=rows;self.daily['errors'].pop(symbol,None)
+                assess(rows);bars[symbol]=rows;downloaded+=1;self.daily['errors'].pop(symbol,None)
                 # A new session requires fresh bars. Only identical grids verified
                 # by today's first successful response can reuse previous bars.
                 if 'verified_grid' not in self.daily:
@@ -402,22 +420,39 @@ class RankedScanner(Scanner):
                             bars[cached]=old
             except BudgetDeferred as exc:
                 attempted.discard(symbol);cursor=previous_cursor;batch.pop()
-                notes.append(str(exc));break
+                notes.append(str(exc));batch_stop_reason='Holdings API reserve protected';break
             except MarketUnavailable as exc:
                 # Keep this symbol pending and stop the batch, rather than poisoning
                 # every stock's daily history cache with an account/network failure.
-                attempted.discard(symbol);cursor=previous_cursor;shared_failure=exc
+                attempted.discard(symbol);cursor=previous_cursor;shared_failure=exc;batch_stop_reason='Shared market-data failure'
                 notes.append('History batch stopped after a shared data failure. Pending stocks will retry at a later scheduled check.')
                 break
             except (ValueError,TypeError,KeyError) as exc:
                 self.daily['errors'][symbol]=str(exc)
-                if 'Local daily API budget' in str(exc):break
-        self.daily['attempted']=sorted(attempted);self.save_daily()
-        self.state['screen_cursor']=cursor;self.save()
+                if 'Local daily API budget' in str(exc):
+                    batch_stop_reason='Local daily API budget exhausted';break
+        self.daily['attempted']=sorted(attempted)
+        stop=batch_stop_reason or ('Batch limit reached' if len(batch)>=(5 if free_monitoring else HISTORY_BATCH) else 'No pending histories eligible or optional work deferred')
+        self.daily['optional_batch_count']+=1
+        self.daily['optional_history_attempts']+=len(batch)
+        self.daily['optional_history_successes']+=downloaded
+        self.daily['optional_batch_stop_counts'][stop]=self.daily['optional_batch_stop_counts'].get(stop,0)+1
+        self.save_daily()
+        self.state['screen_cursor']=cursor
+        self.state['optional_batch_report']=dict(optional_downloads_attempted=len(batch),
+            optional_downloads_succeeded=downloaded,optional_batch_stop_reason=stop,
+            optional_scan_at=self.now('UTC').isoformat())
+        self.save()
         count=sum(s in bars for s in universe)
         self.status.update(histories_ready=count,history_batch=batch,attempts_today=len(attempted),
             focus_ready=sum(s in bars for s in focus),
-            history_failures=dict(self.daily['errors']),histories_pending=sum(s not in bars and s not in attempted for s in universe))
+            history_failures=dict(self.daily['errors']),histories_pending=sum(s not in bars and s not in attempted for s in universe),
+            optional_downloads_succeeded=downloaded,optional_downloads_attempted=len(batch),
+            optional_batch_stop_reason=stop,optional_scan_at=self.state['optional_batch_report']['optional_scan_at'],
+            optional_session_batches=self.daily['optional_batch_count'],
+            optional_session_attempts=self.daily['optional_history_attempts'],
+            optional_session_successes=self.daily['optional_history_successes'],
+            optional_batch_stop_counts=dict(self.daily['optional_batch_stop_counts']))
         if shared_failure:
             self.status['optional_error']=str(shared_failure)
             if not self.status.get('holdings_checked_at'):raise shared_failure
