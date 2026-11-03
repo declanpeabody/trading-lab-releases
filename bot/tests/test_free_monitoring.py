@@ -49,3 +49,18 @@ class FreeMonitoringTests(unittest.TestCase):
                 self.assertLessEqual(scanner.status['optional_downloads_succeeded'],scanner.status['optional_downloads_attempted'])
                 self.assertTrue(scanner.status['optional_batch_stop_reason'])
                 self.assertTrue(scanner.status['optional_scan_at'])
+                self.assertGreaterEqual(scanner.status['optional_session_batches'],1)
+                self.assertEqual(scanner.status['optional_session_attempts'],scanner.daily['optional_history_attempts'])
+                self.assertEqual(scanner.status['optional_session_successes'],
+                    scanner.daily['optional_history_successes'])
+                self.assertEqual(sum(scanner.status['optional_batch_stop_counts'].values()),
+                    scanner.status['optional_session_batches'])
+                self.assertEqual(scanner.status['optional_interval_minutes'],20)
+                # An early cycle retains the most recent batch summary without
+                # spending optional credits or resetting its session counters.
+                last_batch=dict(scanner.state['optional_batch_report'])
+                market.calls=[]
+                with patch('time.time',return_value=stamp+2000):scanner.cycle(ledger)
+                self.assertEqual(scanner.status['optional_downloads_succeeded'],
+                    last_batch['optional_downloads_succeeded'])
+                self.assertTrue(all(call[0]=='quote' and call[2] for call in market.calls))
