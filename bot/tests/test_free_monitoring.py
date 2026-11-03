@@ -44,3 +44,8 @@ class FreeMonitoringTests(unittest.TestCase):
                 with patch('time.time',return_value=stamp+1800):scanner.cycle(ledger)
                 self.assertTrue(any(call[0]=='time_series' and not call[2] for call in market.calls))
                 self.assertLessEqual(len(scanner.status['history_batch']),5)
+                self.assertEqual(scanner.status['optional_downloads_attempted'],len(scanner.status['history_batch']))
+                self.assertGreaterEqual(scanner.status['optional_downloads_succeeded'],0)
+                self.assertLessEqual(scanner.status['optional_downloads_succeeded'],scanner.status['optional_downloads_attempted'])
+                self.assertTrue(scanner.status['optional_batch_stop_reason'])
+                self.assertTrue(scanner.status['optional_scan_at'])
